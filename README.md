@@ -6,7 +6,7 @@ Prompt Track turns existing video into structured, interactive courseware. It at
 
 Install one file into Claude Desktop and open a browser tab. No API key, no Docker, no Node, no cloud account beyond the Claude Desktop login you already have.
 
-<!-- SCREENSHOT: the player in lab mode, a cue card open beside a paused video -->
+<kbd><img src="images/prompt-track-1.png" alt="Prompt Track" width="800"></kbd>
 
 ---
 
