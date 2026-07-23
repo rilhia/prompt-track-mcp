@@ -1,0 +1,631 @@
+{
+  "meta": {
+    "title": "Spaceballs: The New One",
+    "author": "Richard Hall",
+    "version": "0.2",
+    "videos": [
+      {
+        "key": "teaser",
+        "id": "iXBLxUWwoMY",
+        "title": "Spaceballs 2 official teaser (2027)"
+      },
+      {
+        "key": "sb1987",
+        "id": "qAGuYr3hpR4",
+        "title": "Spaceballs (1987)"
+      },
+      {
+        "key": "teaser2",
+        "id": "pJ-51pQXERA",
+        "title": "SPACEBALLS 2: The New One Teaser (2026)"
+      }
+    ],
+    "persona": "You ARE Mel Brooks: comedy legend, director of the original Spaceballs, playing yourself as the viewer's host for this teaser watch-along. Speak in his voice at all times: Borscht-Belt timing, mock-grandiosity followed by instant self-deprecation, warm Yiddish-inflected asides (oy, Baleboste, Meshuggener, Gelt, Chutzpah, Shtick, Mensch, what a business, God willing), breaking the fourth wall, and treating movie marketing as gloriously absurd. You are 2000 years old and have seen everything. Be genuinely funny, never mean. Riff on the franchise avalanche, needle Hollywood's sequel machine, and adore the fans. HARD RULES that never break, even in character: only state facts present in this track (the cues are your truths along with the references); never invent timestamps, release dates, or facts about the films; if you do not know, say so as Mel would (\"listen, even I don't know, and I know everything\"). Stay Mel for greetings, small talk, everything.",
+    "groundRules": [
+      "Speak entirely as Mel Brooks, every reply, no exceptions.",
+      "Only state facts present in this track. The context cues and information in references are the truth.",
+      "Never guess timestamps or invent release dates or film facts.",
+      "Be funny and warm, never cruel. Adore the fans."
+    ],
+    "timeline": [
+      {
+        "type": "still",
+        "id": "opening-still",
+        "image": "https://comicbook.com/wp-content/uploads/sites/4/2026/07/Spaceballs-2Header.jpg",
+        "hold": 1.5,
+        "fit": "cover",
+        "bg": "#000",
+        "caption": "",
+        "transitionOut": {
+          "ms": 500,
+          "color": "#000"
+        }
+      },
+      {
+        "type": "clip",
+        "id": "intro-1",
+        "video": "teaser2",
+        "from": 0,
+        "to": 13,
+        "transitionOut": {
+          "ms": 2000,
+          "holdMs": 150,
+          "color": "#000000",
+          "audio": true
+        }
+      },
+      {
+        "type": "clip",
+        "id": "opening-crawl",
+        "video": "teaser",
+        "from": 3,
+        "to": 86,
+        "transitionIn": {
+          "ms": 500,
+          "delayMs": 150,
+          "color": "#000000",
+          "audio": true
+        },
+        "transitionOut": {
+          "ms": 1500,
+          "holdMs": 300,
+          "color": "#000000",
+          "audio": true
+        },
+        "cues": [
+          {
+            "type": "context",
+            "t": 3,
+            "title": "Opening Crawl",
+            "intro": "Thirty-eight years ago, there was only one Star Wars trilogy\nBut since then there have been...\nA prequel trilogy\nA sequel trilogy\nA sequel to the prequel\nA prequel to the sequel\nCountless TV spinoffs\nA movie spinoff of the TV spinoff which is both a prequel and a sequel\nNot to mention...\n2 Dunes\n7 Jurassic Parks\n2 Avatars plus 3 upcoming Avatars making 5 Avatars\n36 MCU movies with two different Robert Downey Jrs\nDCU Attempt Number 1\nDCU Attempt Number 2\nAn animated Lion King\nA live-action animated Lion King\nA live-action animated Lion King prequel\n8 Harry Potter movies\nA Max TV series remaking the same 8 Harry Potter movies\nA whole streaming service of Star Trek\n7 Alien movies (2 of which were also Predator movies, not to be mistaken for The 6 Predator movies that were not also Alien movies)\n1 Prometheus (which is kind of an Alien movie)\n4 Beatles movies\nAnd... Oppenheimer\nBut in thirty-eight years, there has been only one...\nSpaceballs\nUntil now...",
+            "topics": [
+              "mel brooks",
+              "schwartz",
+              "may the schwartz be with you",
+              "outro"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "hold",
+        "id": "hold-quiz-franchise",
+        "cue": {
+          "type": "quiz",
+          "title": "Quiz: the opening text crawl...",
+          "intro": "Think you caught every franchise Mel rattled off? Ask Claude to quiz you.",
+          "suggestion": "Mel, quiz me on the franchise avalanche from the teaser.",
+          "copyText": "Mel, quiz me on the text crawl from the teaser.",
+          "prompt": "You are Mel Brooks running a quiz. FIRST ask the viewer how many questions they want, 3 to 6, and whether they want easy or fiendish. Wait for their answer. THEN invent a fresh multiple-choice quiz about the franchises in the teaser avalanche. Ask ONE question at a time, wait for the answer, react in character with mock-grand Yiddish asides, reveal the correct answer with a joke, and keep a running score. Vary questions every time. Never invent facts beyond the context cues."
+        }
+      },
+      {
+        "type": "hold",
+        "id": "hold-crawl-text",
+        "cue": {
+          "type": "task",
+          "title": "The Opening Crawl Text",
+          "intro": "The complete breakdown of every franchise callout from the teaser.",
+          "artifacts": [
+            {
+              "language": "text",
+              "filename": "opening_crawl.txt",
+              "code": "Thirty-eight years ago, there was only one Star Wars trilogy\nBut since then there have been...\nA prequel trilogy\nA sequel trilogy\nA sequel to the prequel\nA prequel to the sequel\nCountless TV spinoffs\nA movie spinoff of the TV spinoff which is both a prequel and a sequel\nNot to mention...\n2 Dunes\n7 Jurassic Parks\n2 Avatars plus 3 upcoming Avatars making 5 Avatars\n36 MCU movies with two different Robert Downey Jrs\nDCU Attempt Number 1\nDCU Attempt Number 2\nAn animated Lion King\nA live-action animated Lion King\nA live-action animated Lion King prequel\n8 Harry Potter movies\nA Max TV series remaking the same 8 Harry Potter movies\nA whole streaming service of Star Trek\n7 Alien movies (2 of which were also Predator movies, not to be mistaken for The 6 Predator movies that were not also Alien movies)\n1 Prometheus (which is kind of an Alien movie)\n4 Beatles movies\nAnd... Oppenheimer\nBut in thirty-eight years, there has been only one...\nSpaceballs\nUntil now..."
+            }
+          ],
+          "copyText": "Prepare me a file with the opening text crawl",
+          "prompt": "The viewer wants the teaser's opening crawl text as a file. The full text is in the context cue titled 'Opening Crawl' on this track, use exactly that text, unchanged and in the same line order. Save it as opening_crawl.txt and give it to them as a downloadable file. Stay in character as Mel while you hand it over, but do not alter a single line of the crawl itself."
+        }
+      },
+      {
+        "type": "clip",
+        "id": "intro-teaser2",
+        "video": "teaser2",
+        "from": 12,
+        "to": 65,
+        "transitionIn": {
+          "ms": 1500,
+          "delayMs": 150,
+          "color": "#000000",
+          "audio": true
+        },
+        "transitionOut": {
+          "ms": 1000,
+          "holdMs": 400,
+          "color": "#000000",
+          "audio": true
+        }
+      },
+      {
+        "type": "clip",
+        "id": "intro-teaser3",
+        "video": "teaser2",
+        "from": 64,
+        "to": 70,
+        "transitionIn": {
+          "ms": 1500,
+          "delayMs": 150,
+          "color": "#000000",
+          "audio": true
+        },
+        "transitionOut": {
+          "ms": 1000,
+          "holdMs": 150,
+          "color": "#000000",
+          "audio": true
+        }
+      },
+      {
+        "type": "hold",
+        "id": "hold-public-holiday",
+        "cue": {
+          "type": "task",
+          "title": "Task: petition for a public holiday",
+          "intro": "Want Spaceballs 2 release day off work? Get Mel to write your local official.",
+          "suggestion": "Mel, write a letter to my local government official asking for a public holiday on the Spaceballs 2 release date.",
+          "copyText": "Mel, write a letter to my local government official asking for a public holiday on the Spaceballs 2 release date.",
+          "prompt": "You are Mel Brooks. The viewer wants a funny but genuinely usable formal letter to their local government official requesting that the Spaceballs 2 release date be declared a public holiday. BEFORE writing anything, interview them ONE question at a time, waiting for each answer: (1) their full name, (2) the official title and name of the recipient, (3) their town or region, (4) the release date they want off, or say if it is unannounced, (5) one personal reason Spaceballs means something to them. Do NOT write the letter or use placeholders until you have these. Once you do, write it mock-grand and heartfelt with Mel-style asides, ready to send. Stay fully in character throughout."
+        }
+      },
+      {
+        "type": "clip",
+        "id": "sb-2808",
+        "video": "sb1987",
+        "from": 2808,
+        "to": 2819,
+        "transitionIn": {
+          "ms": 800,
+          "delayMs": 150,
+          "color": "#000000",
+          "audio": true
+        },
+        "transitionOut": {
+          "ms": 1000,
+          "holdMs": 150,
+          "color": "#000000",
+          "audio": true
+        }
+      },
+      {
+        "type": "branch",
+        "id": "classics",
+        "select": "multi",
+        "require": "optional",
+        "title": "More classic scenes...",
+        "intro": "Some optional classics. Watch any, all, or none, then carry on.",
+        "options": [
+          {
+            "label": "When will then be now",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "opt-then-now",
+                "video": "sb1987",
+                "from": 2096,
+                "to": 2220,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 2096,
+                    "title": "Scene: when will then be now",
+                    "intro": "Dark Helmet and Colonel Sandurz watch a VHS copy of Spaceballs itself to find out where the heroes are. The tape reaches the very scene they are in, so they see themselves watching themselves. Sandurz explains they have missed now, and the exchange collapses into 'when will then be now' and the answer 'soon'. A pure fourth-wall gag about home video and merchandising arriving before the film has finished.",
+                    "topics": [
+                      "when will then be now",
+                      "soon",
+                      "instant cassette",
+                      "vhs",
+                      "fourth wall",
+                      "dark helmet",
+                      "colonel sandurz",
+                      "watching the movie inside the movie"
+                    ]
+                  },
+                  {
+                    "type": "note",
+                    "t": 2190,
+                    "title": "They are watching this film",
+                    "note": "Inside the film. On video. Before it finished. Keep up."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "I'm surrounded by assholes",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "opt-assholes",
+                "video": "sb1987",
+                "from": 1065,
+                "to": 1092,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 1065,
+                    "title": "Scene: I'm surrounded by assholes",
+                    "intro": "Dark Helmet, played by Rick Moranis, orders his crew to raise their helmet visors so he can address them properly. Faced with the row of blank faces underneath, he delivers his verdict on the calibre of his own staff. One of the film's most quoted lines and the cleanest summary of Helmet as a small man with a huge helmet.",
+                    "topics": [
+                      "dark helmet",
+                      "rick moranis",
+                      "surrounded by assholes",
+                      "visors",
+                      "helmet",
+                      "crew",
+                      "spaceball one"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Merchandising",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "opt-merch",
+                "video": "sb1987",
+                "from": 2724,
+                "to": 2819,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 2724,
+                    "title": "Scene: Merchandising",
+                    "intro": "Yogurt, the Schwartz-wielding sage played by Mel Brooks, explains that the real money from the movie is not the movie. He unveils a table of Spaceballs tie-in products, the lunchbox, the breakfast cereal, the flamethrower, and declares 'merchandising, merchandising, where the real money from the movie is made'. A joke about Star Wars licensing that has only got sharper with age.",
+                    "topics": [
+                      "merchandising",
+                      "moichandising",
+                      "yogurt",
+                      "mel brooks",
+                      "flamethrower",
+                      "lunchbox",
+                      "cereal",
+                      "the kids love this one",
+                      "licensing"
+                    ]
+                  },
+                  {
+                    "type": "note",
+                    "t": 2784,
+                    "title": "The flamethrower",
+                    "note": "Watch the table. The one Yogurt says the kids really love is a working flamethrower."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Former roommate",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "opt-roommate",
+                "video": "sb1987",
+                "from": 4334,
+                "to": 4370,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 4334,
+                    "title": "Scene: your father's brother's nephew's cousin's former roommate",
+                    "intro": "In the parody of the Vader paternity reveal, Dark Helmet tells Lone Starr that they are related: he is his father's brother's nephew's cousin's former roommate. Lone Starr asks what that makes them, and Helmet answers 'absolutely nothing'. The gag deflates the biggest twist in Star Wars by making the family tree meaningless.",
+                    "topics": [
+                      "dark helmet",
+                      "lone starr",
+                      "roommate",
+                      "what does that make us",
+                      "absolutely nothing",
+                      "vader",
+                      "i am your father",
+                      "parody"
+                    ]
+                  },
+                  {
+                    "type": "note",
+                    "t": 4355,
+                    "title": "Count the relatives",
+                    "note": "Father's brother's nephew's cousin's former roommate. Say it out loud, it scans."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Comb the desert",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "comb",
+                "video": "sb1987",
+                "from": 2842,
+                "to": 2882,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 2842,
+                    "title": "Scene: comb the desert",
+                    "intro": "Ordered to comb the desert for the missing heroes, the Spaceballs take the instruction literally and drag enormous physical combs across the sand. A trooper reports back with the film's most quotable non-finding: 'we ain't found shit'. The prop combs are real and full size, which is why the shot still lands.",
+                    "topics": [
+                      "combing the desert",
+                      "comb the desert",
+                      "we aint found shit",
+                      "giant comb",
+                      "literal",
+                      "spaceballs troopers",
+                      "prop"
+                    ]
+                  },
+                  {
+                    "type": "note",
+                    "t": 2850,
+                    "title": "Those combs are real",
+                    "note": "Full size physical props, dragged across real sand. No effects budget was harmed."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Oh No... Not Again!",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "burst",
+                "video": "sb1987",
+                "from": 4977,
+                "to": 5035,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 4977,
+                    "title": "Scene: oh no, not again",
+                    "intro": "In a diner, John Hurt reprises his own death from Alien: a creature bursts from his chest and he sighs 'oh no, not again'. The alien then puts on a top hat and performs 'Hello My Baby' in the style of the Warner Brothers singing frog. Hurt playing his own most famous scene for laughs is the film's boldest bit of casting.",
+                    "topics": [
+                      "john hurt",
+                      "alien",
+                      "chestburster",
+                      "oh no not again",
+                      "hello my baby",
+                      "michigan j frog",
+                      "diner",
+                      "cameo"
+                    ]
+                  },
+                  {
+                    "type": "note",
+                    "t": 5025,
+                    "title": "That is the actual John Hurt",
+                    "note": "The same actor, the same chest, eight years after Alien. He agreed to do it for the joke."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "This is an unlisted wall...",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "sb-3305",
+                "video": "sb1987",
+                "from": 3305,
+                "to": 3339,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "note",
+                    "t": 3321,
+                    "title": "This is an unlisted wall!",
+                    "note": "Proof that Mel predicted the fact that you can never escape Zoom calls while using the restroom."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Yoghurt! Yoghurt! I Hate Yoghurt!",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "sb-3016",
+                "video": "sb1987",
+                "from": 3016,
+                "to": 3031,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 3016,
+                    "title": "Scene: Yogurt",
+                    "intro": "Yogurt is the film's Yoda, played by Mel Brooks in gold. He is the keeper of the Schwartz, the mystical power that stands in for the Force, and he is entirely relaxed about the fact that his wisdom doubles as a sales pitch.",
+                    "topics": [
+                      "yogurt",
+                      "yoda",
+                      "the schwartz",
+                      "mel brooks",
+                      "gold",
+                      "may the schwartz be with you"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Ludicrous speed!!",
+            "timeline": [
+              {
+                "type": "clip",
+                "id": "sb-1657",
+                "video": "sb1987",
+                "from": 1657,
+                "to": 1675,
+                "transitionIn": {
+                  "ms": 800,
+                  "delayMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "transitionOut": {
+                  "ms": 1000,
+                  "holdMs": 150,
+                  "color": "#000000",
+                  "audio": true
+                },
+                "cues": [
+                  {
+                    "type": "context",
+                    "t": 1657,
+                    "title": "Scene: ludicrous speed",
+                    "intro": "Unsatisfied with light speed and ridiculous speed, Dark Helmet orders ludicrous speed. The ship stretches into a streak and the crew are thrown about, and when they arrive everything has gone plaid rather than into stars. 'They've gone to plaid' is the payoff.",
+                    "topics": [
+                      "ludicrous speed",
+                      "light speed",
+                      "ridiculous speed",
+                      "gone to plaid",
+                      "plaid",
+                      "dark helmet",
+                      "hyperspace parody"
+                    ]
+                  },
+                  {
+                    "type": "note",
+                    "t": 1671,
+                    "title": "What's the matter, Colonel Sandurz... chicken?",
+                    "note": "The entire character of Colonel Sandurz (played by George Wyner) was created and named specifically for this single pun."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "still",
+        "id": "closing-still",
+        "image": "https://i0.wp.com/thefutureoftheforce.com/wp-content/uploads/2025/06/Spaceballs-2-The-Schwartz-Awakens-Header-FUTURE-OF-THE-FORCE.jpg",
+        "hold": 1.5,
+        "fit": "cover",
+        "bg": "#000",
+        "caption": "",
+        "transitionOut": {
+          "ms": 500,
+          "color": "#000"
+        }
+      }
+    ],
+    "references": [
+      {
+        "url": "https://en.wikipedia.org/wiki/Spaceballs",
+        "title": "Spaceballs (1987) - Wikipedia",
+        "note": "Plot, cast, production and reception of the original film."
+      },
+      {
+        "url": "https://en.wikipedia.org/wiki/Mel_Brooks",
+        "title": "Mel Brooks - Wikipedia",
+        "note": "Career and filmography of the director."
+      },
+      {
+        "url": "https://en.wikipedia.org/wiki/Spaceballs:_The_New_One",
+        "title": "Spaceballs: The New One - Wikipedia",
+        "note": "Information about the new film in production."
+      }
+    ]
+  }
+}
