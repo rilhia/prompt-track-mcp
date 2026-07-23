@@ -104,7 +104,7 @@ A track is a single JSON file. The player contains no content of its own.
 
 ### The editor
 
-There is an authoring tool at **http://localhost:3044/editor.html**, linked from the player. It validates as you type, shows the timeline as a tree, and gives you forms for the fiddly parts while leaving the raw JSON editable at any moment. The JSON is always the source of truth, so you can use the forms where they help and drop into the text whenever they get in the way.
+There is an authoring tool at **http://localhost:3044/editor.html**, linked from the player. It validates as you type, shows the timeline as a tree, and gives you forms for the fiddly parts while leaving the raw JSON editable at any moment. The JSON is always the source of truth, so you can use the forms where they help and drop into the text whenever they get in the way. There is also a **Load Example** button, which is worth pressing at least once.
 
 <!-- SCREENSHOT: the editor with a track loaded, structure view on the right -->
 
@@ -115,6 +115,36 @@ Three ways:
 - Drop a `.json` file into the `tracks/` folder and load it as `/tracks/my-track.json`
 - Load from any public URL using the loader on the player page
 - Load from a local file with the file picker
+
+### A real track you can run
+
+The repository ships with [`tracks/spaceballs2.json`](tracks/spaceballs2.json), a
+complete working track built around the Spaceballs 2 teaser. Load it at
+`/tracks/spaceballs2.json`, or paste this straight into the URL loader:
+
+```
+https://raw.githubusercontent.com/rilhia/prompt-track-mcp/main/tracks/spaceballs2.json
+```
+
+It is worth reading as a reference, because it uses nearly everything in this
+document against real footage:
+
+- **Three videos** cut together, two teasers and the 1987 original, switched between mid-track
+- **Four node types**: `still` title cards top and tail it, `clip` for the footage, `hold` for the two set pieces, and a `branch` for the optional scenes
+- **All four cue types**, including a long `context` cue carrying the teaser's entire opening crawl as ground truth
+- **A nine option `multi` branch** of classic scenes, each with its own nested timeline, which the viewer can dip into in any order or skip entirely
+- **A persona and ground rules** that hold Mel Brooks in character while forbidding him from inventing facts
+- **A hidden `prompt` that interviews the viewer**: the public holiday task asks five questions one at a time before writing anything, which is the pattern to copy when a task needs real input rather than placeholders
+- **A task that hands back a file**, built from text stored in a context cue elsewhere in the track
+
+The quiz cue is the clearest illustration of the `suggestion` versus `prompt`
+split. The viewer sees "quiz me on the franchise avalanche". What Claude actually
+receives is an instruction to ask how many questions they want and at what
+difficulty, wait for the answer, then generate a fresh quiz one question at a
+time, keeping score and staying in character throughout. None of that is on the
+card.
+
+<!-- SCREENSHOT: the branch choice card with the nine classic scenes -->
 
 ---
 
@@ -159,6 +189,8 @@ A legacy flat `cues` array at the top level is still honoured and merged with cu
 | `groundRules` | array of string | no | Constraints passed to Claude verbatim |
 | `references` | array of Reference | no | Track-wide sources |
 | `variables` | array of Variable | no | Values asked of the viewer, substituted into artifacts |
+| `author` | string | no | Shown in the editor. Not used by the player |
+| `version` | string | no | Conventional. Not read by anything |
 
 ## Video
 
@@ -377,6 +409,7 @@ Cues live in a clip's `cues` array, or as a hold's single `cue`.
 | `type` | string | yes | See table below |
 | `title` | string | no | Card heading |
 | `intro` | string | no | Card body |
+| `note` | string | no | Alias for `intro`. Used if `intro` is absent |
 | `deeper` | string | no | Extra explanation, revealed on click |
 | `suggestion` | string | no | The question the viewer is shown and can copy to Claude |
 | `copyText` | string | no | What actually gets copied, if different from `suggestion` |
@@ -398,6 +431,8 @@ Cues live in a clip's `cues` array, or as a hold's single `cue`.
 | `context` | No | A silent section marker. Never shown. Read by Claude for grounding and navigation |
 
 `do` is accepted as an alias for `task` and normalised on load. Use `task` in new tracks.
+
+Note cues can put their text in either `intro` or `note`. Both work, and `intro` wins if you supply both.
 
 There is no `checkpoint` type. Older documentation mentioned one and it was never implemented.
 
@@ -499,6 +534,11 @@ A bare string is accepted and treated as a url.
 When a viewer asks something these could answer, Claude reads them with its own web browsing and cites them rather than answering from general knowledge.
 
 ## A complete example
+
+> **This example will not play.** The video IDs, image and documentation URLs are
+> illustrative, so treat it as pseudo-code showing the shape rather than something
+> to load. For a track that actually runs, use `tracks/spaceballs2.json` above, or
+> open the editor and press **Load Example**. 🥚
 
 ```json
 {
