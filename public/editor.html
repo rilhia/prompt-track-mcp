@@ -1,0 +1,1141 @@
+<!DOCTYPE html>
+<!--
+  editor.html - the track authoring tool.
+
+  A companion to the player, served from the same server at /editor.html. Where
+  index.html plays a track, this one helps write one. Entirely standalone: no
+  build step, no dependencies, no server calls. Everything happens in the browser
+  against text in a textarea.
+
+  THE CENTRAL IDEA
+  The JSON is the source of truth, always. This is not a WYSIWYG editor that owns
+  a document and emits JSON at the end. It is a live view over text the author can
+  edit directly at any time, plus form controls that write back into that same
+  text. Both directions stay open, so an author can use the forms for the fiddly
+  parts and drop into raw JSON whenever the forms are in the way.
+
+  That choice drives the round-trip that most of this file implements:
+
+    textarea  --tryParse-->  parsed object  --render-->  structure view + forms
+        ^                                                          |
+        +----------------- syncToJson <------- edits --------------+
+
+  Anything that edits state must go back out through syncToJson, or the author's
+  next keystroke in the textarea will silently overwrite it.
+
+  WHAT IT PROVIDES
+    * live JSON parsing with inline error reporting
+    * schema-aware validation mirroring the player's load-time checks, plus
+      authoring-only warnings the player does not care about
+    * a structure view of the timeline tree
+    * per-node forms for clips, branches, holds, stills and their cues
+    * cue editing including code artifacts and the ask-Claude suggestion
+
+  GOTCHA
+  programmaticWrite guards against a feedback loop: writing to the textarea fires
+  its input event, which would re-parse and re-render mid-edit and steal focus.
+  Anything writing to the textarea must set that flag.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prompt Track Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --carbon:#0e1116; --slate:#161b22; --slate-2:#1c232d; --line:#28303c;
+  --text:#e8edf2; --muted:#8b96a5; --fg:#e8edf2;
+  --cyan:#35d6e8; --purple:#9d7bff; --amber:#ffc24b; --green:#4ade80; --red:#ff6b6b;
+  --cyan-dim:rgba(53,214,232,.12); --amber-dim:rgba(255,194,75,.14);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --disp:'Space Grotesk',sans-serif; --body:'Inter',system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--carbon);color:var(--text);font-family:var(--body);font-size:14px;line-height:1.5;min-height:100vh}
+a{color:var(--cyan)}
+code{font-family:var(--mono);font-size:.92em}
+
+/* top bar */
+.topbar{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--slate);position:sticky;top:0;z-index:10}
+.brand{font-family:var(--disp);font-weight:600;font-size:16px;letter-spacing:.01em}
+.brand .tag{color:var(--cyan);font-size:11px;letter-spacing:.09em;text-transform:uppercase;margin-left:8px}
+.topbar .spacer{flex:1}
+.btn{font-family:var(--body);font-size:13px;font-weight:600;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--slate-2);color:var(--fg);cursor:pointer;transition:border-color .15s,background .15s}
+.btn:hover{border-color:var(--cyan)}
+.btn.primary{border-color:var(--cyan);color:var(--cyan)}
+.btn.primary:hover{background:var(--cyan);color:var(--carbon)}
+.btn.ghost{background:transparent}
+.btn:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line);color:var(--muted)}
+
+/* layout */
+.wrap{display:grid;grid-template-columns:minmax(320px,1fr) minmax(360px,1.1fr);gap:0;height:calc(100vh - 59px)}
+@media(max-width:900px){.wrap{grid-template-columns:1fr;height:auto}}
+.pane{overflow:auto;padding:20px 22px}
+.pane.left{border-right:1px solid var(--line)}
+.pane h2{font-family:var(--disp);font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+
+/* loader row */
+.loader-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.loader-row input[type=url]{flex:1;min-width:180px;background:var(--carbon);border:1px solid var(--line);border-radius:8px;padding:9px 11px;color:var(--fg);font-family:var(--mono);font-size:12.5px}
+.loader-row input[type=url]:focus{outline:none;border-color:var(--cyan)}
+
+/* JSON editor */
+.json-editor{width:100%;min-height:420px;height:calc(100vh - 320px);background:var(--carbon);border:1px solid var(--line);border-radius:10px;color:var(--fg);font-family:var(--mono);font-size:12.5px;line-height:1.55;padding:14px;resize:vertical;white-space:pre;tab-size:2}
+.json-editor:focus{outline:none;border-color:var(--cyan)}
+.json-editor.invalid{border-color:var(--red)}
+
+/* status line */
+.status{margin-top:10px;font-family:var(--mono);font-size:12px;min-height:20px}
+.status.ok{color:var(--green)}
+.status.err{color:var(--red)}
+
+/* validation panel */
+.checks{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.checks-head{font-family:var(--disp);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:9px 13px;border-bottom:1px solid var(--line);background:var(--slate-2)}
+.checks-body{padding:6px 0}
+.check{display:flex;gap:9px;padding:7px 13px;font-size:12.5px;align-items:flex-start}
+.check .mk{flex:0 0 auto;width:14px;height:14px;border-radius:4px;margin-top:2px}
+.check.pass .mk{background:var(--green)}
+.check.warn .mk{background:var(--amber)}
+.check.fail .mk{background:var(--red)}
+.check .msg{color:var(--text)}
+.check .sub{color:var(--muted);font-size:11.5px}
+.checks-empty{padding:12px 13px;color:var(--muted);font-size:12.5px}
+
+/* timeline cards (read-only in pass 1) */
+.tl-meta{font-size:12.5px;color:var(--muted);margin-bottom:14px}
+.tl-meta b{color:var(--fg);font-weight:600}
+.node{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;background:var(--slate);overflow:hidden}
+.node-head{display:flex;align-items:center;gap:10px;padding:11px 13px;background:var(--slate-2);border-bottom:1px solid var(--line)}
+.node-kind{font-family:var(--disp);font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;padding:2px 8px;border-radius:999px}
+.node-kind.clip{color:var(--cyan);border:1px solid var(--cyan)}
+.node-kind.still{color:var(--amber);border:1px solid var(--amber)}
+.node-kind.hold{color:var(--green);border:1px solid var(--green)}
+.node-kind.branch{color:var(--purple);border:1px solid var(--purple)}
+.node-id{font-family:var(--mono);font-size:12px;color:var(--fg)}
+.node-head .idx{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
+.node-body{padding:11px 13px;font-size:12.5px;color:var(--muted)}
+.node-body .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+.node-body .kv{font-family:var(--mono);font-size:11.5px}
+.node-body .kv b{color:var(--fg);font-weight:600}
+.node-cues{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
+.cue-line{display:flex;gap:8px;align-items:center;font-size:11.5px;padding:2px 0}
+.cue-type{font-family:var(--disp);font-size:9.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;border-radius:999px;color:var(--muted);border:1px solid var(--line)}
+.cue-type.note{color:var(--cyan);border-color:var(--cyan)}
+.cue-type.task{color:var(--amber);border-color:var(--amber)}
+.cue-type.quiz{color:var(--purple);border-color:var(--purple)}
+.cue-type.context{color:var(--muted)}
+.branch-opts{margin-top:6px}
+.branch-opt{padding:6px 10px;border:1px solid var(--line);border-radius:7px;margin-top:5px;background:var(--carbon)}
+.branch-opt .lbl{color:var(--fg);font-size:12px;font-weight:600}
+.empty{color:var(--muted);font-size:13px;padding:30px 0;text-align:center}
+.hint{font-size:12px;color:var(--muted);margin-top:8px}
+.foot{padding:14px 22px;border-top:1px solid var(--line);color:var(--muted);font-size:11.5px}
+
+/* ---- pass 2: editing ---- */
+.mode-row{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{font-family:var(--body);font-size:12px;font-weight:600;padding:7px 13px;background:var(--slate-2);color:var(--muted);border:none;cursor:pointer}
+.seg button.on{background:var(--cyan);color:var(--carbon)}
+.node.editable .node-head{cursor:default}
+.node .drag{cursor:grab;color:var(--muted);font-size:14px;line-height:1;padding:0 2px;user-select:none}
+.node .drag:active{cursor:grabbing}
+.node.dragging{opacity:.5}
+.node.drop-target{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)}
+.node-actions{display:flex;gap:4px;margin-left:auto}
+.iconbtn{font-family:var(--body);font-size:11px;font-weight:600;padding:3px 8px;border-radius:6px;border:1px solid var(--line);background:var(--carbon);color:var(--muted);cursor:pointer}
+.iconbtn:hover{border-color:var(--cyan);color:var(--cyan)}
+.iconbtn.danger:hover{border-color:var(--red);color:var(--red)}
+.node-head .idx{margin-left:0}
+.fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:9px}
+.field{display:flex;flex-direction:column;gap:3px}
+.field label{font-family:var(--disp);font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.field input,.field select,.field textarea{background:var(--carbon);border:1px solid var(--line);border-radius:7px;padding:7px 9px;color:var(--fg);font-family:var(--mono);font-size:12px}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--cyan)}
+.field textarea{font-family:var(--body);resize:vertical;min-height:52px}
+.field.wide{grid-column:1/-1}
+.subsec{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.subsec-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.subsec-title{font-family:var(--disp);font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.toggle{font-size:11px;color:var(--cyan);cursor:pointer;background:none;border:none;font-weight:600}
+.addbar{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 4px}
+.addbar .btn{font-size:12px;padding:7px 12px}
+.cue-edit{border:1px solid var(--line);border-radius:8px;padding:9px;margin-top:7px;background:var(--carbon)}
+.cue-edit .fields{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}
+.rm-x{margin-left:auto;color:var(--muted);cursor:pointer;font-size:12px;border:none;background:none}
+.rm-x:hover{color:var(--red)}
+.cue-sec{margin-top:9px;padding:9px;border:1px dashed var(--line);border-radius:8px;background:var(--slate)}
+.cue-sec .subsec-head{margin-bottom:6px}
+.cue-sec .hint{margin-top:0}
+.art-edit{border:1px solid var(--line);border-radius:7px;padding:8px;margin-top:7px;background:var(--carbon)}
+.art-edit textarea{font-family:var(--mono);font-size:11.5px;white-space:pre}
+.opt-block{border:1px solid var(--line);border-left:2px solid var(--purple);border-radius:8px;padding:9px;margin-top:8px;background:var(--carbon)}
+.opt-head{display:flex;align-items:center;gap:7px;margin-bottom:7px;flex-wrap:wrap}
+.opt-tag{font-family:var(--disp);font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--purple)}
+.opt-label{flex:1;min-width:130px;background:var(--slate);border:1px solid var(--line);border-radius:6px;padding:6px 8px;color:var(--fg);font-family:var(--body);font-size:12.5px}
+.opt-label:focus{outline:none;border-color:var(--cyan)}
+.subnode{border:1px solid var(--line);border-radius:7px;margin-top:7px;background:var(--slate);overflow:hidden}
+.subnode-head{display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--slate-2);border-bottom:1px solid var(--line)}
+.subnode-body{padding:9px 10px}
+.subnode .fields{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
+.color-row{display:flex;gap:6px;align-items:center}
+.color-swatch{flex:0 0 auto;width:30px;height:30px;padding:0;border:1px solid var(--line);border-radius:7px;background:var(--carbon);cursor:pointer}
+.color-swatch::-webkit-color-swatch-wrapper{padding:2px}
+.color-swatch::-webkit-color-swatch{border:none;border-radius:5px}
+.color-swatch::-moz-color-swatch{border:none;border-radius:5px}
+.color-hex{flex:1;min-width:0;background:var(--carbon);border:1px solid var(--line);border-radius:7px;padding:7px 9px;color:var(--fg);font-family:var(--mono);font-size:12px}
+.color-hex:focus{outline:none;border-color:var(--cyan)}
+.color-hex.bad{border-color:var(--red)}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">Prompt Track <span class="tag">Editor</span></div>
+    <div class="spacer"></div>
+    <button class="btn ghost" id="btnSample">Load example</button>
+    <button class="btn" id="btnFile">Open file</button>
+    <input type="file" id="fileInput" accept=".json,application/json" hidden>
+    <button class="btn" id="btnFormat">Format</button>
+    <button class="btn" id="btnExport">Download JSON</button>
+    <a class="btn primary" id="btnPlayer" href="/" target="_blank" rel="noopener">Open player</a>
+  </div>
+
+  <div class="wrap">
+    <div class="pane left">
+      <h2>Track source</h2>
+      <div class="loader-row">
+        <input type="url" id="urlInput" placeholder="https://... load a track from a URL">
+        <button class="btn" id="btnLoadUrl">Load</button>
+      </div>
+      <textarea class="json-editor" id="editor" spellcheck="false" placeholder="Paste or load a track here, or start from the example."></textarea>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div class="pane right">
+      <h2>Structure &amp; checks</h2>
+      <div class="checks">
+        <div class="checks-head">Validation</div>
+        <div class="checks-body" id="checks"><div class="checks-empty">Load or paste a track to see checks.</div></div>
+      </div>
+      <div id="tlMeta" class="tl-meta"></div>
+      <div class="mode-row">
+        <span class="seg" id="modeSeg"><button data-mode="view" class="on">View</button><button data-mode="edit">Edit</button></span>
+        <span class="hint" id="modeHint" style="margin-top:0"></span>
+      </div>
+      <div id="timeline"></div>
+      <div class="addbar" id="addBar" style="display:none">
+        <button class="btn" data-add="clip">+ Clip</button>
+        <button class="btn" data-add="still">+ Still</button>
+        <button class="btn" data-add="hold">+ Hold</button>
+        <button class="btn" data-add="branch">+ Branch</button>
+      </div>
+    </div>
+  </div>
+  <div class="foot">Edits here do not touch the player. Download the JSON and load it in the player, or serve it and load by URL. A future update adds one-click preview.</div>
+
+<script>
+"use strict";
+
+const editorEl = document.getElementById('editor');
+const statusEl = document.getElementById('status');
+const checksEl = document.getElementById('checks');
+const tlEl = document.getElementById('timeline');
+const tlMetaEl = document.getElementById('tlMeta');
+
+// The last SUCCESSFULLY parsed track. Deliberately kept when parsing fails, so
+// the structure view stays on screen while the author is midway through typing
+// and the JSON is briefly invalid. Blanking it would make the whole panel flicker
+// away on every keystroke inside a string.
+let parsed = null;
+let parseError = null;
+
+/* ---------- parsing + live update ---------- */
+
+/**
+ * Parse the textarea and refresh everything downstream.
+ *
+ * Called on a debounce from the input event. On failure it reports the error and
+ * keeps the previous good parse, which is what makes the panel stable while
+ * typing rather than collapsing between valid states.
+ */
+function tryParse(){
+  const text = editorEl.value.trim();
+  if(!text){ parsed = null; parseError = null; setStatus('', ''); render(); return; }
+  try {
+    parsed = JSON.parse(text);
+    parseError = null;
+    editorEl.classList.remove('invalid');
+    setStatus('Valid JSON', 'ok');
+  } catch(e){
+    parseError = e.message;
+    editorEl.classList.add('invalid');
+    setStatus('JSON error: ' + e.message, 'err');
+    // keep last good `parsed` for the structure view, but flag it
+  }
+  render();
+}
+/** Set the status line. `kind` is '', 'ok' or 'err' and picks the styling. */
+function setStatus(msg, kind){
+  statusEl.textContent = msg;
+  statusEl.className = 'status' + (kind ? ' ' + kind : '');
+}
+
+// 250ms debounce: fast enough to feel live, slow enough that a full parse and
+// re-render is not attempted on every keystroke of a long track.
+let debounce = null;
+editorEl.addEventListener('input', ()=>{ if(programmaticWrite) return; clearTimeout(debounce); debounce = setTimeout(tryParse, 250); });
+
+/* ---------- schema-aware validation ---------- */
+// Mirrors the player's load-time checks and adds authoring-specific ones. Pure
+// functions, no side effects on the track.
+//
+// Three severities, and the distinction matters:
+//   pass  correct, shown so the author can see it was checked
+//   warn  loads and plays, but probably not what was meant
+//   fail  the player will not handle this correctly
+//
+// Warnings are the useful half. The player is forgiving by design, so a track can
+// load cleanly and still be wrong: a cue timed outside its clip never fires, a
+// branch option pointing at a missing video dead-ends. Catching those here is the
+// whole reason this tool exists, since the alternative is finding out mid-demo.
+
+/**
+ * Check a track and return a list of findings.
+ * @param {object} track Parsed track JSON.
+ * @returns {Array<{level:string,title:string,detail:string}>}
+ */
+function validate(track){
+  const out = [];
+  if(!track || typeof track !== 'object'){ out.push(fail('Not an object', 'The track must be a JSON object.')); return out; }
+  const meta = track.meta || {};
+  // videos
+  const vids = Array.isArray(meta.videos) ? meta.videos : (meta.video ? [meta.video] : []);
+  if(!vids.length){ out.push(fail('No videos', 'meta.videos needs at least one video with a key and id.')); }
+  else out.push(pass(vids.length + ' video' + (vids.length>1?'s':''), vids.map(v=>v.key||'?').join(', ')));
+  const videoKeys = new Set(vids.map(v=>v.key));
+
+  // timeline
+  const tl = Array.isArray(meta.timeline) ? meta.timeline : null;
+  if(!tl){ out.push(fail('No timeline', 'meta.timeline must be an array of nodes.')); return out; }
+  out.push(pass(tl.length + ' timeline nodes', null));
+
+  // collect ids across timeline (including branch option clips)
+  const ids = {};
+  const dupes = new Set();
+  const addId = (id)=>{ if(!id) return; ids[id] = (ids[id]||0)+1; if(ids[id]===2) dupes.add(id); };
+  const walk = (arr)=>{ if(!Array.isArray(arr)) return; for(const n of arr){ if(!n||typeof n!=='object') continue;
+    addId(n.id);
+    if(n.type==='branch' && Array.isArray(n.options)) n.options.forEach(o=>walk(o.timeline)); } };
+  walk(tl);
+
+  if(dupes.size) out.push(fail('Duplicate ids', [...dupes].join(', '))); else out.push(pass('All ids unique', null));
+
+  // required ids: clips/stills/holds should each have an id (recommended, holds required if a cue targets them)
+  let missingId = 0;
+  const checkMissing = (arr)=>{ for(const n of (arr||[])){ if(!n||!n.type) continue;
+    if((n.type==='clip'||n.type==='still'||n.type==='hold') && !n.id) missingId++;
+    if(n.type==='branch' && Array.isArray(n.options)) n.options.forEach(o=>checkMissing(o.timeline)); } };
+  checkMissing(tl);
+  if(missingId) out.push(warn(missingId + ' node' + (missingId>1?'s':'') + ' without an id', 'Give every clip, still and hold a unique id so cues can bind and validation is reliable.'));
+
+  // video key references
+  const badVid = [];
+  const checkVid = (arr)=>{ for(const n of (arr||[])){ if(!n) continue;
+    if(n.type==='clip' && n.video && videoKeys.size && !videoKeys.has(n.video)) badVid.push(n.id||('clip@'+n.from));
+    if(n.type==='branch' && Array.isArray(n.options)) n.options.forEach(o=>checkVid(o.timeline)); } };
+  checkVid(tl);
+  if(badVid.length) out.push(fail('Unknown video key', 'These clips reference a video not in meta.videos: ' + badVid.join(', ')));
+
+  // clip from/to sanity + cue-in-range + hold cue + transition lead vs clip length
+  const rangeIssues = [], cueRange = [], holdNoCue = [], leadIssues = [];
+  const checkClips = (arr)=>{ for(const n of (arr||[])){ if(!n||!n.type) continue;
+    if(n.type==='clip'){
+      const from = Number(n.from)||0, to = Number(n.to)||0;
+      if(to <= from) rangeIssues.push((n.id||('@'+from)) + ' (to<=from)');
+      // nested cues must sit within [from,to]
+      if(Array.isArray(n.cues)){
+        for(const c of n.cues){ if(c && c.type!=='context' && typeof c.t==='number' && (c.t < from || c.t > to)){
+          cueRange.push((n.id||('@'+from)) + ': cue t=' + c.t + ' outside ' + from + '-' + to); } }
+      }
+      // transition lead vs clip length
+      const out2 = n.transitionOut;
+      if(out2 && Number.isFinite(out2.ms)){
+        const lead = (out2.ms + (out2.holdMs||0))/1000;
+        if(lead >= (to - from)) leadIssues.push((n.id||('@'+from)) + ' (fade lead ' + lead.toFixed(2) + 's >= clip ' + (to-from) + 's)');
+      }
+    }
+    if(n.type==='hold'){ if(!n.cue) holdNoCue.push(n.id||'hold'); }
+    if(n.type==='branch' && Array.isArray(n.options)) n.options.forEach(o=>checkClips(o.timeline)); } };
+  checkClips(tl);
+  if(rangeIssues.length) out.push(fail('Clip range', rangeIssues.join('; ')));
+  if(cueRange.length) out.push(warn('Cue outside clip', cueRange.join('; ') + '. Interactive cues fire only while the playhead is inside the clip.'));
+  if(leadIssues.length) out.push(warn('Fade longer than clip', leadIssues.join('; ') + '. The fade-out would start before the clip begins.'));
+  if(holdNoCue.length) out.push(warn('Hold without a cue', holdNoCue.join(', ') + '. A hold with no cue just passes straight through.'));
+
+  // legacy flat cues linking to missing ids
+  if(Array.isArray(track.cues)){
+    const unresolved = track.cues.filter(c=>c.link_id && !ids[c.link_id]).map(c=>c.link_id);
+    if(unresolved.length) out.push(fail('Cue link_id missing', [...new Set(unresolved)].join(', ')));
+  }
+
+  if(out.every(o=>o.kind==='pass')) out.push(pass('No problems found', 'This track looks ready to load.'));
+  return out;
+}
+function pass(msg, sub){ return {kind:'pass', msg, sub}; }
+function warn(msg, sub){ return {kind:'warn', msg, sub}; }
+function fail(msg, sub){ return {kind:'fail', msg, sub}; }
+
+/* ---------- mode ---------- */
+let mode = 'view';
+document.getElementById('modeSeg').addEventListener('click', (e)=>{
+  const b = e.target.closest('button[data-mode]'); if(!b) return;
+  mode = b.dataset.mode;
+  [...document.querySelectorAll('#modeSeg button')].forEach(x=>x.classList.toggle('on', x.dataset.mode===mode));
+  document.getElementById('modeHint').textContent = mode==='edit' ? 'Drag the handle to reorder. Edits sync to the JSON.' : '';
+  render();
+});
+
+/* Push the model back into the JSON pane and re-validate. Keeps card <-> JSON in sync. */
+let programmaticWrite = false;
+/**
+ * Write the edited object back into the textarea.
+ *
+ * The one way state returns to the JSON, and therefore the last step of every
+ * edit. Sets programmaticWrite first so the resulting input event does not
+ * re-enter tryParse and re-render the forms out from under the author.
+ */
+function syncToJson(){
+  programmaticWrite = true;
+  editorEl.value = JSON.stringify(parsed, null, 2);
+  programmaticWrite = false;
+  editorEl.classList.remove('invalid');
+  parseError = null;
+  setStatus('Valid JSON', 'ok');
+}
+/** Standard tail of an edit: push to JSON, revalidate, redraw. */
+function afterEdit(){ syncToJson(); render(); }
+
+/* ---------- render structure + checks ---------- */
+/** Redraw the structure view, timeline strip and validation panel from `parsed`. */
+function render(){
+  if(!parsed){ checksEl.innerHTML = '<div class="checks-empty">' + (parseError ? 'Fix the JSON error to validate.' : 'Load or paste a track to see checks.') + '</div>'; tlEl.innerHTML=''; tlMetaEl.innerHTML=''; document.getElementById('addBar').style.display='none'; return; }
+  const results = validate(parsed);
+  checksEl.innerHTML = results.map(r =>
+    '<div class="check ' + r.kind + '"><span class="mk"></span><span class="msg">' + esc(r.msg) + (r.sub ? '<br><span class="sub">' + esc(r.sub) + '</span>' : '') + '</span></div>'
+  ).join('');
+
+  const meta = parsed.meta || {};
+  const vids = Array.isArray(meta.videos) ? meta.videos : [];
+  tlMetaEl.innerHTML = '<b>' + esc(meta.title || 'Untitled track') + '</b>' + (meta.author ? ' &middot; ' + esc(meta.author) : '') +
+    ' &middot; ' + vids.length + ' video' + (vids.length===1?'':'s');
+
+  document.getElementById('addBar').style.display = (mode==='edit') ? 'flex' : 'none';
+
+  const tl = Array.isArray(meta.timeline) ? meta.timeline : [];
+  if(!tl.length){ tlEl.innerHTML = '<div class="empty">No timeline nodes yet.' + (mode==='edit'?' Add one below.':'') + '</div>'; return; }
+  tlEl.innerHTML = tl.map((n,i)=>mode==='edit' ? renderNodeEdit(n,i) : renderNode(n,i)).join('');
+  if(mode==='edit') wireEditing();
+}
+
+/* ----- VIEW render (read-only) ----- */
+/**
+ * Infer a node's type when the author has not written one.
+ *
+ * Matches the player's own inference in buildTimeline, so the editor shows what
+ * will actually happen rather than what was literally typed. The two must be kept
+ * in step: if the player's rule changes, this one has to change with it.
+ */
+function nodeType(n){ return n.type || (n.options ? 'branch' : (n.video ? 'clip' : (n.image ? 'still' : '?'))); }
+/** Draw one node in the read-only structure view. */
+function renderNode(n, i){
+  const type = nodeType(n);
+  let body = '';
+  if(type==='clip'){
+    body += '<div class="row"><span class="kv"><b>video</b> ' + esc(n.video||'?') + '</span>' +
+            '<span class="kv"><b>from</b> ' + fmt(n.from) + '</span><span class="kv"><b>to</b> ' + fmt(n.to) + '</span>' +
+            '<span class="kv"><b>len</b> ' + fmt((Number(n.to)||0)-(Number(n.from)||0)) + 's</span></div>';
+    body += transRow(n);
+    if(Array.isArray(n.cues) && n.cues.length){ body += '<div class="node-cues">' + n.cues.map(cueLine).join('') + '</div>'; }
+  } else if(type==='still'){
+    body += '<div class="row"><span class="kv"><b>hold</b> ' + fmt(n.hold) + 's</span><span class="kv"><b>fit</b> ' + esc(n.fit||'cover') + '</span></div>';
+    body += '<div class="row"><span class="kv"><b>image</b> ' + esc(shorten(n.image||'')) + '</span></div>';
+    body += transRow(n);
+  } else if(type==='hold'){
+    if(n.cue){ body += '<div class="node-cues">' + cueLine(n.cue) + '</div>'; } else body += '<span class="kv" style="color:var(--amber)">no cue set</span>';
+  } else if(type==='branch'){
+    body += '<div class="row"><span class="kv"><b>select</b> ' + esc(n.select||'multi') + '</span><span class="kv"><b>require</b> ' + esc(n.require||'optional') + '</span></div>';
+    if(n.title) body += '<div class="row"><span class="kv">' + esc(n.title) + '</span></div>';
+    if(Array.isArray(n.options)){
+      body += '<div class="branch-opts">' + n.options.map(o=>
+        '<div class="branch-opt"><span class="lbl">' + esc(o.label||'option') + '</span> <span class="kv" style="color:var(--muted)"> &middot; ' + (Array.isArray(o.timeline)?o.timeline.length:0) + ' clip(s)</span></div>'
+      ).join('') + '</div>';
+    }
+  }
+  return '<div class="node"><div class="node-head"><span class="node-kind ' + type + '">' + type + '</span>' +
+    '<span class="node-id">' + esc(n.id || '(no id)') + '</span><span class="idx">#' + (i+1) + '</span></div>' +
+    '<div class="node-body">' + (body || '<span class="kv">&mdash;</span>') + '</div></div>';
+}
+/** One transition summary line in the structure view. */
+function transRow(n){
+  const parts = [];
+  if(n.transitionIn) parts.push('in ' + (n.transitionIn.ms||0) + 'ms');
+  if(n.transitionOut) parts.push('out ' + (n.transitionOut.ms||0) + 'ms' + (n.transitionOut.holdMs?' +'+n.transitionOut.holdMs+'ms hold':''));
+  if(!parts.length) return '';
+  return '<div class="row"><span class="kv" style="color:var(--muted)">fades: ' + parts.join(', ') + '</span></div>';
+}
+/** One cue summary line in the structure view. */
+function cueLine(c){
+  if(!c || !c.type) return '';
+  const t = (typeof c.t==='number') ? ' <span class="kv">@' + fmt(c.t) + '</span>' : '';
+  return '<div class="cue-line"><span class="cue-type ' + c.type + '">' + esc(c.type) + '</span><span>' + esc(c.title || '(untitled)') + '</span>' + t + '</div>';
+}
+
+/* ----- EDIT render (forms) ----- */
+/** Build a video key dropdown from meta.videos, marking the current selection. */
+function videoOptions(sel){
+  const vids = (parsed.meta && Array.isArray(parsed.meta.videos)) ? parsed.meta.videos : [];
+  return vids.map(v=>'<option value="'+esc(v.key)+'"'+(v.key===sel?' selected':'')+'>'+esc(v.key)+'</option>').join('');
+}
+/** A labelled form input bound to a path within the track object. */
+function fInput(label, path, val, cast){
+  return '<div class="field"><label>'+esc(label)+'</label><input data-path="'+esc(path)+'" data-cast="'+(cast||'str')+'" value="'+esc(val==null?'':val)+'"></div>';
+}
+/** Draw the editable form for one node, dispatching on its type. */
+function renderNodeEdit(n, i){
+  const type = nodeType(n);
+  let body = '';
+  if(type==='clip'){
+    body += '<div class="fields">' +
+      '<div class="field"><label>video</label><select data-path="video" data-cast="str">'+videoOptions(n.video)+'</select></div>' +
+      fInput('from (s)','from', n.from, 'num') + fInput('to (s)','to', n.to, 'num') + fInput('id','id', n.id, 'str') + '</div>';
+    body += transEdit(n);
+    body += cuesEdit(n);
+  } else if(type==='still'){
+    body += '<div class="fields">' + fInput('id','id', n.id, 'str') + fInput('hold (s)','hold', n.hold, 'num') +
+      '<div class="field"><label>fit</label><select data-path="fit" data-cast="str">' +
+        ['cover','contain','fill'].map(f=>'<option'+(f===(n.fit||'cover')?' selected':'')+'>'+f+'</option>').join('') + '</select></div>' +
+      colorField('bg', 'bg', n.bg) +
+      '<div class="field wide"><label>image url</label><input data-path="image" data-cast="str" value="'+esc(n.image||'')+'"></div>' +
+      '<div class="field wide"><label>caption</label><input data-path="caption" data-cast="str" value="'+esc(n.caption||'')+'"></div></div>';
+    body += transEdit(n);
+  } else if(type==='hold'){
+    body += '<div class="fields">' + fInput('id','id', n.id, 'str') + '</div>';
+    body += holdCueEdit(n);
+  } else if(type==='branch'){
+    body += '<div class="fields">' + fInput('id','id', n.id, 'str') +
+      '<div class="field"><label>select</label><select data-path="select" data-cast="str">' +
+        ['multi','single'].map(s=>'<option'+(s===(n.select||'multi')?' selected':'')+'>'+s+'</option>').join('')+'</select></div>' +
+      '<div class="field"><label>require</label><select data-path="require" data-cast="str">' +
+        ['optional','required'].map(s=>'<option'+(s===(n.require||'optional')?' selected':'')+'>'+s+'</option>').join('')+'</select></div>' +
+      '<div class="field wide"><label>title</label><input data-path="title" data-cast="str" value="'+esc(n.title||'')+'"></div>' +
+      '<div class="field wide"><label>intro</label><input data-path="intro" data-cast="str" value="'+esc(n.intro||'')+'"></div></div>';
+    body += branchOptionsEdit(n);
+  }
+  return '<div class="node editable" data-i="'+i+'">' +
+    '<div class="node-head"><span class="drag" draggable="true" data-i="'+i+'" title="Drag to reorder">&#9776;</span>' +
+    '<span class="node-kind ' + type + '">' + type + '</span>' +
+    '<span class="node-id">' + esc(n.id || '(no id)') + '</span>' +
+    '<span class="node-actions">' +
+      '<button class="iconbtn" data-act="dup" data-i="'+i+'">Duplicate</button>' +
+      '<button class="iconbtn" data-act="up" data-i="'+i+'">&uarr;</button>' +
+      '<button class="iconbtn" data-act="down" data-i="'+i+'">&darr;</button>' +
+      '<button class="iconbtn danger" data-act="del" data-i="'+i+'">Delete</button>' +
+    '</span></div>' +
+    '<div class="node-body">' + body + '</div></div>';
+}
+/** Editor block for a node's in and out transitions. */
+function transEdit(n){
+  return '<div class="subsec"><div class="subsec-head"><span class="subsec-title">Transition in</span>' +
+      '<button class="toggle" data-toggle="transitionIn">'+(n.transitionIn?'remove':'add')+'</button></div>' +
+      (n.transitionIn ? transFields('transitionIn', n.transitionIn, true) : '') + '</div>' +
+    '<div class="subsec"><div class="subsec-head"><span class="subsec-title">Transition out</span>' +
+      '<button class="toggle" data-toggle="transitionOut">'+(n.transitionOut?'remove':'add')+'</button></div>' +
+      (n.transitionOut ? transFields('transitionOut', n.transitionOut, false) : '') + '</div>';
+}
+/** The duration, colour and hold fields making up one transition. */
+function transFields(key, t, isIn){
+  const p = key + '.';
+  let f = '<div class="fields">' +
+    '<div class="field"><label>ms</label><input data-path="'+p+'ms" data-cast="num" value="'+esc(t.ms==null?'':t.ms)+'"></div>' +
+    colorField('color', p+'color', t.color) +
+    '<div class="field"><label>audio</label><select data-path="'+p+'audio" data-cast="bool"><option value="true"'+(t.audio!==false?' selected':'')+'>true</option><option value="false"'+(t.audio===false?' selected':'')+'>false</option></select></div>';
+  if(isIn) f += '<div class="field"><label>delayMs</label><input data-path="'+p+'delayMs" data-cast="num" value="'+esc(t.delayMs==null?'':t.delayMs)+'"></div>';
+  else f += '<div class="field"><label>holdMs</label><input data-path="'+p+'holdMs" data-cast="num" value="'+esc(t.holdMs==null?'':t.holdMs)+'"></div>';
+  return f + '</div>';
+}
+/** Editor for the list of cues nested on a clip node. */
+function cuesEdit(n){
+  const cues = Array.isArray(n.cues) ? n.cues : [];
+  let h = '<div class="subsec"><div class="subsec-head"><span class="subsec-title">Cues on this clip</span>' +
+    '<button class="toggle" data-addcue="1">add cue</button></div>';
+  h += cues.map((c,ci)=>cueEditBlock(c, ci)).join('');
+  if(!cues.length) h += '<div class="hint">No cues yet.</div>';
+  return h + '</div>';
+}
+/** Editor for the single cue carried by a hold node. */
+function holdCueEdit(n){
+  let h = '<div class="subsec"><div class="subsec-head"><span class="subsec-title">Hold cue</span>' +
+    (n.cue ? '<button class="toggle" data-holdcue="remove">remove</button>' : '<button class="toggle" data-holdcue="add">add</button>') + '</div>';
+  if(n.cue) h += cueEditBlock(n.cue, 'hold');
+  else h += '<div class="hint">A hold presents one cue (task or quiz) between clips.</div>';
+  return h + '</div>';
+}
+// Branch options, rendered as nested editable cards. IMPORTANT: nested clip cards use
+// the class `subnode`, never `node`, so the existing top-level handlers (which resolve
+// their target via closest('.node')) can never accidentally pick one up. Nested fields
+// carry data-opt / data-sub so the shared field handler knows to target the option's
+// clip instead of the branch node itself.
+/** Editor for a branch's options, each with its own nested timeline. */
+function branchOptionsEdit(n){
+  const opts = Array.isArray(n.options) ? n.options : [];
+  let h = '<div class="subsec"><div class="subsec-head"><span class="subsec-title">Options</span>' +
+    '<button class="toggle" data-addopt="1">add option</button></div>';
+  if(!opts.length){
+    h += '<div class="hint">No options yet. Each option is a path the viewer can choose.</div>';
+    return h + '</div>';
+  }
+  opts.forEach((o, oi)=>{
+    const sub = Array.isArray(o.timeline) ? o.timeline : [];
+    h += '<div class="opt-block">' +
+      '<div class="opt-head">' +
+        '<span class="opt-tag">Option ' + (oi+1) + '</span>' +
+        '<input class="opt-label" data-optlabel="'+oi+'" value="'+esc(o.label||'')+'" placeholder="Label shown to the viewer">' +
+        '<button class="iconbtn" data-optmove="up" data-opt="'+oi+'">&uarr;</button>' +
+        '<button class="iconbtn" data-optmove="down" data-opt="'+oi+'">&darr;</button>' +
+        '<button class="iconbtn danger" data-rmopt="'+oi+'">Remove</button>' +
+      '</div>';
+    if(!sub.length){
+      h += '<div class="hint">No clips in this option yet.</div>';
+    } else {
+      sub.forEach((sn, si)=>{ h += subClipEdit(sn, oi, si); });
+    }
+    h += '<div class="addbar" style="margin:8px 0 0"><button class="btn" data-addsub="clip" data-opt="'+oi+'">+ Clip</button>' +
+         '<button class="btn" data-addsub="still" data-opt="'+oi+'">+ Still</button>' +
+         '<button class="btn" data-addsub="hold" data-opt="'+oi+'">+ Hold</button></div>';
+    h += '</div>';
+  });
+  return h + '</div>';
+}
+
+// One nested node inside a branch option. Mirrors the top-level forms but every input
+// is tagged with its option/sub index so edits land on the right object.
+/** Editor for a clip nested inside a branch option. */
+function subClipEdit(sn, oi, si){
+  const type = nodeType(sn);
+  const P = ' data-opt="'+oi+'" data-sub="'+si+'"';
+  const f = (label, path, val, cast)=>
+    '<div class="field"><label>'+esc(label)+'</label><input data-path="'+esc(path)+'" data-cast="'+(cast||'str')+'"'+P+' value="'+esc(val==null?'':val)+'"></div>';
+  let body = '';
+  if(type==='clip'){
+    body += '<div class="fields">' +
+      '<div class="field"><label>video</label><select data-path="video" data-cast="str"'+P+'>'+videoOptions(sn.video)+'</select></div>' +
+      f('from (s)','from', sn.from, 'num') + f('to (s)','to', sn.to, 'num') + f('id','id', sn.id, 'str') + '</div>';
+  } else if(type==='still'){
+    body += '<div class="fields">' + f('id','id', sn.id, 'str') + f('hold (s)','hold', sn.hold, 'num') +
+      '<div class="field"><label>fit</label><select data-path="fit" data-cast="str"'+P+'>' +
+        ['cover','contain','fill'].map(x=>'<option'+(x===(sn.fit||'cover')?' selected':'')+'>'+x+'</option>').join('') + '</select></div>' +
+      '<div class="field wide"><label>image url</label><input data-path="image" data-cast="str"'+P+' value="'+esc(sn.image||'')+'"></div></div>';
+  } else if(type==='hold'){
+    body += '<div class="fields">' + f('id','id', sn.id, 'str') + '</div>' +
+      '<div class="hint">Edit this hold\u2019s cue in the JSON pane, or move it to the top level to use the full cue form.</div>';
+  }
+  // transitions for nested clips/stills
+  if(type==='clip' || type==='still'){
+    body += '<div class="subsec"><div class="subsec-head"><span class="subsec-title">Transition in</span>' +
+      '<button class="toggle" data-subtoggle="transitionIn" data-opt="'+oi+'" data-sub="'+si+'">'+(sn.transitionIn?'remove':'add')+'</button></div>' +
+      (sn.transitionIn ? subTransFields('transitionIn', sn.transitionIn, true, oi, si) : '') + '</div>' +
+      '<div class="subsec"><div class="subsec-head"><span class="subsec-title">Transition out</span>' +
+      '<button class="toggle" data-subtoggle="transitionOut" data-opt="'+oi+'" data-sub="'+si+'">'+(sn.transitionOut?'remove':'add')+'</button></div>' +
+      (sn.transitionOut ? subTransFields('transitionOut', sn.transitionOut, false, oi, si) : '') + '</div>';
+  }
+  return '<div class="subnode" data-opt="'+oi+'" data-sub="'+si+'">' +
+    '<div class="subnode-head"><span class="node-kind ' + type + '">' + type + '</span>' +
+    '<span class="node-id">' + esc(sn.id || '(no id)') + '</span>' +
+    '<span class="node-actions">' +
+      '<button class="iconbtn" data-subact="up" data-opt="'+oi+'" data-sub="'+si+'">&uarr;</button>' +
+      '<button class="iconbtn" data-subact="down" data-opt="'+oi+'" data-sub="'+si+'">&darr;</button>' +
+      '<button class="iconbtn" data-subact="dup" data-opt="'+oi+'" data-sub="'+si+'">Duplicate</button>' +
+      '<button class="iconbtn danger" data-subact="del" data-opt="'+oi+'" data-sub="'+si+'">Delete</button>' +
+    '</span></div><div class="subnode-body">' + body + '</div></div>';
+}
+/** Transition fields for a nested clip, at the deeper indent level. */
+function subTransFields(key, t, isIn, oi, si){
+  const p = key + '.';
+  const P = ' data-opt="'+oi+'" data-sub="'+si+'"';
+  let f = '<div class="fields">' +
+    '<div class="field"><label>ms</label><input data-path="'+p+'ms" data-cast="num"'+P+' value="'+esc(t.ms==null?'':t.ms)+'"></div>' +
+    colorField('color', p+'color', t.color, P) +
+    '<div class="field"><label>audio</label><select data-path="'+p+'audio" data-cast="bool"'+P+'><option value="true"'+(t.audio!==false?' selected':'')+'>true</option><option value="false"'+(t.audio===false?' selected':'')+'>false</option></select></div>';
+  if(isIn) f += '<div class="field"><label>delayMs</label><input data-path="'+p+'delayMs" data-cast="num"'+P+' value="'+esc(t.delayMs==null?'':t.delayMs)+'"></div>';
+  else f += '<div class="field"><label>holdMs</label><input data-path="'+p+'holdMs" data-cast="num"'+P+' value="'+esc(t.holdMs==null?'':t.holdMs)+'"></div>';
+  return f + '</div>';
+}
+
+// A colour field: a visual swatch (native picker) beside the hex text box. Either can
+// be edited and they keep each other in step. `extra` carries data-opt/data-sub for
+// fields inside branch options. Only the hex input is bound to the model; the swatch
+// writes into it and fires its event, so there is one code path for saving.
+/** A colour input paired with a hex text field, kept in sync by wireColorFields. */
+function colorField(label, path, val, extra){
+  const v = normHex(val) || '#000000';
+  const ex = extra || '';
+  return '<div class="field"><label>'+esc(label)+'</label>' +
+    '<span class="color-row">' +
+      '<input type="color" class="color-swatch" value="'+esc(v)+'" aria-label="'+esc(label)+' picker">' +
+      '<input class="color-hex" data-path="'+esc(path)+'" data-cast="str"'+ex+' value="'+esc(val==null?'':val)+'" placeholder="#000000" spellcheck="false">' +
+    '</span></div>';
+}
+// Accept #rgb / #rrggbb (with or without the hash) and return #rrggbb, else null.
+/**
+ * Normalise a colour to #rrggbb.
+ *
+ * Authors type colours several ways and the native colour input accepts only the
+ * full six digit form, so shorthand and a missing hash are both tolerated here
+ * rather than being rejected as invalid.
+ */
+function normHex(s){
+  if(s==null) return null;
+  let x = String(s).trim();
+  if(!x) return null;
+  if(x[0] !== '#') x = '#' + x;
+  if(/^#[0-9a-fA-F]{3}$/.test(x)) return '#' + x[1]+x[1] + x[2]+x[2] + x[3]+x[3];
+  if(/^#[0-9a-fA-F]{6}$/.test(x)) return x.toLowerCase();
+  return null;
+}
+// Keep swatch and hex box in step. Typing a valid hex updates the swatch; using the
+// swatch writes the hex into the text box and triggers its normal save handler.
+/** Keep each colour swatch and its hex text field mirroring each other. */
+function wireColorFields(root){
+  root.querySelectorAll('.color-row').forEach(row=>{
+    const sw = row.querySelector('.color-swatch');
+    const hex = row.querySelector('.color-hex');
+    if(!sw || !hex) return;
+    sw.addEventListener('input', ()=>{
+      hex.value = sw.value;
+      hex.dispatchEvent(new Event('input', { bubbles:true }));
+    });
+    hex.addEventListener('input', ()=>{
+      const n = normHex(hex.value);
+      if(n){ sw.value = n; hex.classList.remove('bad'); }
+      else hex.classList.add('bad');
+    });
+  });
+}
+
+/** The full editor for one cue: type, timing, content, artifacts, suggestion. */
+function cueEditBlock(c, ci){
+  const isHold = ci==='hold';
+  const base = isHold ? 'cue.' : ('cues.'+ci+'.');
+  const types = ['note','task','quiz','context'];
+  let h = '<div class="cue-edit"><div class="fields">' +
+    '<div class="field"><label>type</label><select data-path="'+base+'type" data-cast="str">' +
+      types.map(t=>'<option'+(t===c.type?' selected':'')+'>'+t+'</option>').join('') + '</select></div>' +
+    (isHold ? '' : '<div class="field"><label>t (s)</label><input data-path="'+base+'t" data-cast="num" value="'+esc(c.t==null?'':c.t)+'"></div>') +
+    '<div class="field wide"><label>title</label><input data-path="'+base+'title" data-cast="str" value="'+esc(c.title||'')+'"></div>';
+  if(c.type==='note'){
+    h += '<div class="field wide"><label>note</label><textarea data-path="'+base+'note" data-cast="str">'+esc(c.note||'')+'</textarea></div>';
+    h += '</div>';
+  } else if(c.type==='context'){
+    h += '<div class="field wide"><label>intro</label><textarea data-path="'+base+'intro" data-cast="str">'+esc(c.intro||'')+'</textarea></div>';
+    h += '</div>';
+  } else {
+    // task / quiz: intro, then two independent optional sections.
+    h += '<div class="field wide"><label>intro</label><input data-path="'+base+'intro" data-cast="str" value="'+esc(c.intro||'')+'"></div>';
+    h += '</div>';
+    h += artifactsSection(c, base, ci);
+    h += askClaudeSection(c, base, ci);
+  }
+  return h + (isHold ? '' : '<button class="rm-x" data-rmcue="'+ci+'">remove cue</button>') + '</div>';
+}
+
+// Optional section 1: copyable content handed to the viewer (renders as a code block
+// with a Copy code button in the player's Materials sidebar).
+/**
+ * Editor for a cue's code artifacts.
+ *
+ * Artifacts are the canonical code a viewer copies, and they may contain
+ * {{PLACEHOLDER}} tokens the player substitutes per viewer. Left as literal text
+ * here: substitution is a playback-time concern.
+ */
+function artifactsSection(c, base, ci){
+  const arts = Array.isArray(c.artifacts) ? c.artifacts : [];
+  let h = '<div class="cue-sec"><div class="subsec-head"><span class="subsec-title">Content to copy</span>' +
+    '<button class="toggle" data-artifact="add" data-ci="'+ci+'">add</button></div>';
+  if(!arts.length){
+    h += '<div class="hint">Optional. Text or code the viewer can copy, shown as a block with a Copy button.</div>';
+  } else {
+    arts.forEach((a, ai)=>{
+      const ab = base + 'artifacts.' + ai + '.';
+      h += '<div class="art-edit"><div class="fields">' +
+        '<div class="field"><label>filename</label><input data-path="'+ab+'filename" data-cast="str" value="'+esc(a.filename||'')+'"></div>' +
+        '<div class="field"><label>language</label><input data-path="'+ab+'language" data-cast="str" value="'+esc(a.language||'text')+'"></div>' +
+        '<div class="field wide"><label>content</label><textarea data-path="'+ab+'code" data-cast="str" rows="6">'+esc(a.code||'')+'</textarea></div>' +
+        '</div><button class="rm-x" data-rmart="'+ai+'" data-ci="'+ci+'">remove content</button></div>';
+    });
+  }
+  return h + '</div>';
+}
+
+// Optional section 2: a thing to ask Claude, plus the authored prompt Claude runs.
+/**
+ * Editor for the ask-Claude parts of a cue.
+ *
+ * Two distinct fields that are easy to confuse:
+ *   suggestion/copyText  what the VIEWER sees and can copy into Claude
+ *   prompt               the hidden authored instructions Claude actually runs
+ *
+ * The split is the point. The viewer sees something short and natural, while the
+ * real behaviour lives in the prompt, which activate_prompt retrieves server-side.
+ * See src/mcp-core.js.
+ */
+function askClaudeSection(c, base, ci){
+  const has = !!(c.prompt || c.copyText || c.suggestion);
+  let h = '<div class="cue-sec"><div class="subsec-head"><span class="subsec-title">Ask Claude</span>' +
+    '<button class="toggle" data-ask="'+(has?'remove':'add')+'" data-ci="'+ci+'">'+(has?'remove':'add')+'</button></div>';
+  if(!has){
+    h += '<div class="hint">Optional. A question the viewer copies, and the prompt Claude follows when they ask it.</div>';
+  } else {
+    h += '<div class="fields">' +
+      '<div class="field wide"><label>question the viewer copies</label><input data-path="'+base+'copyText" data-cast="str" value="'+esc(c.copyText||c.suggestion||'')+'"></div>' +
+      '<div class="field wide"><label>prompt for Claude</label><textarea data-path="'+base+'prompt" data-cast="str" rows="5">'+esc(c.prompt||'')+'</textarea></div>' +
+      '</div>';
+  }
+  return h + '</div>';
+}
+
+/* ---------- editing engine ---------- */
+function tl(){ return (parsed && parsed.meta && Array.isArray(parsed.meta.timeline)) ? parsed.meta.timeline : []; }
+
+/**
+ * Write a value at a dotted path within the track object, creating containers as
+ * needed. How every form control edits nested track state without each one
+ * knowing the shape around it.
+ */
+function setPath(node, path, raw, cast){
+  let val = raw;
+  if(cast==='num'){ val = raw==='' ? undefined : Number(raw); if(Number.isNaN(val)) val = undefined; }
+  else if(cast==='bool'){ val = (raw==='true'); }
+  else { val = (raw===''? undefined : raw); }
+  const parts = path.split('.');
+  let obj = node;
+  for(let i=0;i<parts.length-1;i++){
+    const k = parts[i];
+    if(obj[k]==null || typeof obj[k]!=='object') obj[k] = (/^\d+$/.test(parts[i+1]) ? [] : {});
+    obj = obj[k];
+  }
+  const last = parts[parts.length-1];
+  if(val===undefined) delete obj[last]; else obj[last] = val;
+}
+
+/**
+ * Generate an id not already used anywhere in the track.
+ *
+ * Duplicate ids break the player in confusing ways (see validateTrackIds in
+ * index.html), so new nodes and cues get a guaranteed-unique one rather than a
+ * guessable default the author might paste twice.
+ */
+function uniqueId(base){
+  const used = new Set();
+  const walk = (arr)=>{ for(const n of (arr||[])){ if(!n) continue; if(n.id) used.add(n.id);
+    if(n.type==='branch' && Array.isArray(n.options)) n.options.forEach(o=>walk(o.timeline)); } };
+  walk(tl());
+  if(!used.has(base)) return base;
+  let i=2; while(used.has(base+'-'+i)) i++; return base+'-'+i;
+}
+
+/** Create a blank node of the given type, prefilled enough to be valid. */
+function newNode(type){
+  const vids = (parsed.meta && parsed.meta.videos) || [];
+  const vk = vids.length ? vids[0].key : 'main';
+  if(type==='clip') return { type:'clip', id:uniqueId('clip'), video:vk, from:0, to:10 };
+  if(type==='still') return { type:'still', id:uniqueId('still'), image:'', hold:4, fit:'cover', bg:'#000' };
+  if(type==='hold') return { type:'hold', id:uniqueId('hold'), cue:{ type:'task', title:'', prompt:'' } };
+  if(type==='branch') return { type:'branch', id:uniqueId('branch'), select:'multi', require:'optional', title:'', options:[{label:'Option 1', timeline:[]}] };
+  return { type:'clip', id:uniqueId('clip'), video:vk, from:0, to:10 };
+}
+
+/** Re-run validation and redraw the checks panel. */
+function refreshChecks(){
+  const results = validate(parsed);
+  checksEl.innerHTML = results.map(r => '<div class="check ' + r.kind + '"><span class="mk"></span><span class="msg">' + esc(r.msg) + (r.sub ? '<br><span class="sub">' + esc(r.sub) + '</span>' : '') + '</span></div>').join('');
+}
+
+/**
+ * Attach listeners to the form controls just rendered.
+ *
+ * Called after every render because the forms are rebuilt from scratch each time,
+ * so previously attached listeners are gone with the old DOM.
+ */
+function wireEditing(){
+  wireColorFields(tlEl);
+  tlEl.querySelectorAll('[data-path]').forEach(el=>{
+    const handler = ()=>{
+      const card = el.closest('.node'); if(!card) return;
+      const i = Number(card.dataset.i); const node = tl()[i]; if(!node) return;
+      // If this field belongs to a clip inside a branch option, target that nested
+      // node instead. Absent data-opt means the original top-level behaviour.
+      let target = node;
+      if(el.dataset.opt != null && el.dataset.sub != null){
+        const opt = (node.options||[])[Number(el.dataset.opt)];
+        const sub = opt && Array.isArray(opt.timeline) ? opt.timeline[Number(el.dataset.sub)] : null;
+        if(!sub) return;
+        target = sub;
+      }
+      setPath(target, el.dataset.path, el.value, el.dataset.cast);
+      syncToJson();
+      if(el.dataset.path==='id'){
+        const chip = (el.dataset.opt!=null) ? el.closest('.subnode').querySelector('.node-id') : card.querySelector('.node-id');
+        if(chip) chip.textContent = target.id || '(no id)';
+      }
+      refreshChecks();
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  });
+  tlEl.querySelectorAll('[data-act]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const i = Number(btn.dataset.i); const arr = tl(); if(i<0||i>=arr.length) return;
+      const act = btn.dataset.act;
+      if(act==='del'){ arr.splice(i,1); }
+      else if(act==='dup'){ const copy = JSON.parse(JSON.stringify(arr[i])); if(copy.id) copy.id = uniqueId(copy.id); arr.splice(i+1,0,copy); }
+      else if(act==='up' && i>0){ const [n]=arr.splice(i,1); arr.splice(i-1,0,n); }
+      else if(act==='down' && i<arr.length-1){ const [n]=arr.splice(i,1); arr.splice(i+1,0,n); }
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-toggle]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const card = btn.closest('.node'); const i=Number(card.dataset.i); const node=tl()[i]; if(!node) return;
+      const key = btn.dataset.toggle;
+      if(node[key]) delete node[key];
+      else node[key] = (key==='transitionIn') ? { ms:600, delayMs:100, color:'#000000', audio:true } : { ms:800, holdMs:150, color:'#000000', audio:true };
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-addcue]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const card=btn.closest('.node'); const i=Number(card.dataset.i); const node=tl()[i]; if(!node) return;
+      if(!Array.isArray(node.cues)) node.cues = [];
+      node.cues.push({ type:'note', t:Number(node.from)||0, title:'', note:'' });
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-rmcue]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const card=btn.closest('.node'); const i=Number(card.dataset.i); const node=tl()[i]; if(!node||!Array.isArray(node.cues)) return;
+      node.cues.splice(Number(btn.dataset.rmcue),1);
+      if(!node.cues.length) delete node.cues;
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-holdcue]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const card=btn.closest('.node'); const i=Number(card.dataset.i); const node=tl()[i]; if(!node) return;
+      if(btn.dataset.holdcue==='add') node.cue = { type:'task', title:'', prompt:'' };
+      else delete node.cue;
+      afterEdit();
+    });
+  });
+  // Resolve which cue object a section button belongs to (a clip cue by index, or a
+  // hold's single cue).
+  const cueFor = (btn)=>{
+    const card = btn.closest('.node'); if(!card) return null;
+    const node = tl()[Number(card.dataset.i)]; if(!node) return null;
+    const ci = btn.dataset.ci;
+    if(ci==='hold') return node.cue || null;
+    return (Array.isArray(node.cues) ? node.cues[Number(ci)] : null) || null;
+  };
+  tlEl.querySelectorAll('[data-artifact]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const cue = cueFor(btn); if(!cue) return;
+      if(!Array.isArray(cue.artifacts)) cue.artifacts = [];
+      cue.artifacts.push({ language:'text', filename:'notes.txt', code:'' });
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-rmart]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const cue = cueFor(btn); if(!cue || !Array.isArray(cue.artifacts)) return;
+      cue.artifacts.splice(Number(btn.dataset.rmart),1);
+      if(!cue.artifacts.length) delete cue.artifacts;
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-ask]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const cue = cueFor(btn); if(!cue) return;
+      if(btn.dataset.ask==='add'){ cue.copyText = cue.copyText || ''; cue.prompt = cue.prompt || ''; }
+      else { delete cue.copyText; delete cue.prompt; delete cue.suggestion; }
+      afterEdit();
+    });
+  });
+  // ---- branch option handlers (nested; keyed by data-opt / data-sub) ----
+  const branchNodeOf = (btn)=>{ const card = btn.closest('.node'); return card ? tl()[Number(card.dataset.i)] : null; };
+  const optOf = (btn)=>{ const n = branchNodeOf(btn); if(!n || !Array.isArray(n.options)) return null;
+    return n.options[Number(btn.dataset.opt)] || null; };
+  tlEl.querySelectorAll('[data-addopt]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const n = branchNodeOf(btn); if(!n) return;
+      if(!Array.isArray(n.options)) n.options = [];
+      n.options.push({ label:'Option '+(n.options.length+1), timeline:[] });
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-rmopt]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const n = branchNodeOf(btn); if(!n || !Array.isArray(n.options)) return;
+      n.options.splice(Number(btn.dataset.rmopt),1);
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-optmove]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const n = branchNodeOf(btn); if(!n || !Array.isArray(n.options)) return;
+      const oi = Number(btn.dataset.opt); const dir = btn.dataset.optmove;
+      if(dir==='up' && oi>0){ const [o]=n.options.splice(oi,1); n.options.splice(oi-1,0,o); }
+      if(dir==='down' && oi<n.options.length-1){ const [o]=n.options.splice(oi,1); n.options.splice(oi+1,0,o); }
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-optlabel]').forEach(el=>{
+    const h = ()=>{
+      const card = el.closest('.node'); const n = card ? tl()[Number(card.dataset.i)] : null;
+      if(!n || !Array.isArray(n.options)) return;
+      const o = n.options[Number(el.dataset.optlabel)]; if(!o) return;
+      o.label = el.value;
+      syncToJson(); refreshChecks();
+    };
+    el.addEventListener('input', h);
+  });
+  tlEl.querySelectorAll('[data-addsub]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const o = optOf(btn); if(!o) return;
+      if(!Array.isArray(o.timeline)) o.timeline = [];
+      o.timeline.push(newNode(btn.dataset.addsub));
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-subact]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const o = optOf(btn); if(!o || !Array.isArray(o.timeline)) return;
+      const arr = o.timeline; const si = Number(btn.dataset.sub); const act = btn.dataset.subact;
+      if(si<0 || si>=arr.length) return;
+      if(act==='del') arr.splice(si,1);
+      else if(act==='dup'){ const copy = JSON.parse(JSON.stringify(arr[si])); if(copy.id) copy.id = uniqueId(copy.id); arr.splice(si+1,0,copy); }
+      else if(act==='up' && si>0){ const [s]=arr.splice(si,1); arr.splice(si-1,0,s); }
+      else if(act==='down' && si<arr.length-1){ const [s]=arr.splice(si,1); arr.splice(si+1,0,s); }
+      afterEdit();
+    });
+  });
+  tlEl.querySelectorAll('[data-subtoggle]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const o = optOf(btn); if(!o || !Array.isArray(o.timeline)) return;
+      const sn = o.timeline[Number(btn.dataset.sub)]; if(!sn) return;
+      const key = btn.dataset.subtoggle;
+      if(sn[key]) delete sn[key];
+      else sn[key] = (key==='transitionIn') ? { ms:600, delayMs:100, color:'#000000', audio:true } : { ms:800, holdMs:150, color:'#000000', audio:true };
+      afterEdit();
+    });
+  });
+  // Nested option cards must not act as top-level drop targets.
+  tlEl.querySelectorAll('.subnode').forEach(sn=>{
+    sn.addEventListener('dragover', (e)=>{ e.stopPropagation(); });
+    sn.addEventListener('drop', (e)=>{ e.stopPropagation(); });
+  });
+  let dragFrom = null;
+  tlEl.querySelectorAll('.drag[draggable=true]').forEach(handle=>{
+    handle.addEventListener('dragstart', (e)=>{ dragFrom = Number(handle.dataset.i); handle.closest('.node').classList.add('dragging'); if(e.dataTransfer) e.dataTransfer.effectAllowed='move'; });
+    handle.addEventListener('dragend', ()=>{ tlEl.querySelectorAll('.node').forEach(n=>n.classList.remove('dragging','drop-target')); });
+  });
+  tlEl.querySelectorAll('.node').forEach(card=>{
+    card.addEventListener('dragover', (e)=>{ e.preventDefault(); card.classList.add('drop-target'); });
+    card.addEventListener('dragleave', ()=>card.classList.remove('drop-target'));
+    card.addEventListener('drop', (e)=>{ e.preventDefault(); card.classList.remove('drop-target');
+      const to = Number(card.dataset.i);
+      if(dragFrom==null || dragFrom===to) return;
+      const arr = tl(); const [n] = arr.splice(dragFrom,1); arr.splice(to,0,n); dragFrom=null; afterEdit();
+    });
+  });
+}
+
+document.getElementById('addBar').addEventListener('click', (e)=>{
+  const b = e.target.closest('button[data-add]'); if(!b || !parsed) return;
+  if(!parsed.meta) parsed.meta = {};
+  if(!Array.isArray(parsed.meta.timeline)) parsed.meta.timeline = [];
+  parsed.meta.timeline.push(newNode(b.dataset.add));
+  afterEdit();
+});
+
+/* ---------- helpers ---------- */
+/** Escape text for HTML. Track content is arbitrary author input, so always. */
+function esc(s){ const d=document.createElement('div'); d.textContent = (s==null?'':String(s)); return d.innerHTML; }
+function fmt(n){ if(n==null||n==='') return '?'; const x=Number(n); return Number.isFinite(x)? (Math.round(x*100)/100) : esc(n); }
+/** Truncate a string for display in the structure view. */
+function shorten(s){ s=String(s); return s.length>52 ? s.slice(0,49)+'...' : s; }
+
+/* ---------- toolbar actions ---------- */
+document.getElementById('btnFormat').onclick = ()=>{
+  if(!parsed){ setStatus('Nothing valid to format', 'err'); return; }
+  editorEl.value = JSON.stringify(parsed, null, 2);
+  tryParse();
+};
+document.getElementById('btnExport').onclick = ()=>{
+  const text = editorEl.value;
+  const blob = new Blob([text], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const name = (parsed && parsed.meta && parsed.meta.title ? parsed.meta.title.replace(/[^a-z0-9]+/gi,'-').toLowerCase() : 'track') + '.json';
+  a.href = url; a.download = name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+};
+document.getElementById('btnFile').onclick = ()=>document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange = (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = ()=>{ editorEl.value = r.result; tryParse(); };
+  r.readAsText(f);
+};
+document.getElementById('btnLoadUrl').onclick = async ()=>{
+  const u = document.getElementById('urlInput').value.trim();
+  if(!u){ setStatus('Enter a URL first', 'err'); return; }
+  setStatus('Loading...', '');
+  try {
+    const res = await fetch(u);
+    const text = await res.text();
+    editorEl.value = text;
+    tryParse();
+  } catch(e){ setStatus('Could not load: ' + e.message, 'err'); }
+};
+document.getElementById('btnSample').onclick = ()=>{ editorEl.value = SAMPLE; tryParse(); };
+
+/* ---------- starter example ---------- */
+const SAMPLE = JSON.stringify({
+  meta: {
+    title: "Roll With Rick",
+    author: "",
+    videos: [ { key: "main", id: "dQw4w9WgXcQ", title: "Never Gonna Give You Up" } ],
+    persona: "",
+    groundRules: [],
+    timeline: [
+      { type: "clip", id: "clip-1", video: "main", from: 0, to: 20,
+        transitionOut: { ms: 800, holdMs: 150, color: "#000000", audio: true },
+        cues: [ { type: "note", t: 10, title: "Guess What?", note: "He's never gonna give never gonna give...." } ] },
+      { type: "hold", id: "hold-1",
+        cue: { type: "task", title: "What was Rick thinking?",
+               intro: "Ask Claude to tell you what Rick was thinking.",
+               prompt: "Provide an overly serious academic paper analysing the relational sociology of Rick Astley's 1987 masterpiece 'Never Gonna Give You Up'. Instead of using direct lyrics, summarise his core six-part ethical pledge using formal legal and philosophical terminology.",
+               copyText: "What was Rick thinking with this song?" } },
+      { type: "clip", id: "clip-2", video: "main", from: 30, to: 50,
+        transitionIn: { ms: 600, delayMs: 100, color: "#000000", audio: true } }
+    ]
+  }
+}, null, 2);
+
+/* boot */
+tryParse();
+</script>
+</body>
+</html>

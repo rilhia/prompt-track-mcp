@@ -1,0 +1,6 @@
+# Installed by npm install; not tracked.
+node_modules/
+
+# Build output. The .mcpb bundle is published as a GitHub release asset rather
+# than committed, since it is a binary that changes on every build.
+dist/

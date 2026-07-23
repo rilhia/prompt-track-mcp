@@ -1,0 +1,24 @@
+# docker-compose.yml — one container running the Prompt Track web server.
+#
+# The self-hosting path. Claude Desktop connects separately by exec-ing the
+# stdio bridge into this container, which is why its config names the container
+# by the fixed name set below.
+#
+#   docker compose up -d --build
+#
+# Then open http://localhost:3044.
+
+services:
+  prompt-track:
+    build: .
+    # Fixed rather than generated, because claude_desktop_config.json refers to
+    # it by name in its `docker exec` command. Renaming this breaks that config.
+    container_name: prompt-track
+    ports:
+      - "3044:3044"
+    # Tracks are bind-mounted rather than baked into the image, so a track can be
+    # added or edited on the host and picked up without a rebuild.
+    volumes:
+      - ./tracks:/app/tracks
+    # Survives reboots and crashes, but stays down if it was stopped deliberately.
+    restart: unless-stopped

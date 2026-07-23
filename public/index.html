@@ -1,0 +1,2713 @@
+<!DOCTYPE html>
+<!--
+  index.html - the Prompt Track player page.
+
+  The entire viewer-facing application: markup, styles and logic in one file,
+  served as-is by src/web.js. There is no build step and no bundler, which is a
+  deliberate constraint rather than an oversight. The page ships inside a Claude
+  Desktop extension, and a single readable file means anyone can open it, change a
+  colour or a rule, reload, and see the result. Nothing is minified, nothing is
+  generated, and what is in the repository is what runs.
+
+  WHAT IT DOES
+  Plays a YouTube video against a track: a JSON sidecar of authored cues. At each
+  cue's timestamp the video pauses, a card appears, and the viewer does something
+  before playback continues. It also keeps a WebSocket open to the server so
+  Claude can read where the viewer is and drive playback back.
+
+  ================================ ARCHITECTURE ================================
+
+  Four systems share this file. Knowing which one owns a behaviour is most of what
+  is needed to change anything safely.
+
+  1. THE TIMELINE TREE
+     A track's meta.timeline is a tree of nodes, not a flat list of timestamps.
+     Node types: clip (play video from/to), branch (viewer chooses a path), hold (a
+     pause between clips carrying a cue), still (an image on screen for N seconds),
+     end (stop). Timelines nest inside branch options, so a track can cut around a
+     source video, offer a detour, and rejoin.
+
+     Position is a stack of frames (treeStack), each {arr, idx}. treeStep processes
+     the node at the top frame; treeAdvance moves to the next, popping back to the
+     parent when an array is exhausted. This is why there is no single "current
+     time" for a track: the playhead belongs to whichever clip is playing, and the
+     tree holds everything around it.
+
+     buildTimeline normalises the tree on load and flattens nested cues into a flat
+     track.cues array, so both the rest of this page and the MCP server keep reading
+     one simple list.
+
+  2. CUE FIRING
+     tick() polls playback four times a second and fires any cue whose timestamp
+     the playhead just crossed. Cues fire once, tracked in the `fired` set, and are
+     re-armed when the viewer scrubs back past them. The timing constants below are
+     the only sub-second logic in the page and are commented where they are defined.
+
+  3. THE SERVER LINK
+     One WebSocket. Outbound: status, so Claude can answer accurately. Inbound:
+     commands (pause, resume, seek, clip), so Claude can drive the video. The page
+     never asks the server what to do; it reports and it obeys.
+
+  4. THE CARD AND MATERIALS UI
+     Cue cards, the materials sidebar, code artifacts with {{PLACEHOLDER}}
+     substitution, the progress rail, calibration and variable questions.
+
+  ============================== GOTCHAS ==============================
+
+  * Cue timestamps are positions in the SOURCE video, not in the edited timeline.
+    A track that cuts around a video has cue times that do not run in order.
+  * The YouTube iframe API is loaded from Google and blocked by some privacy
+    extensions. There is an explicit timeout warning for that case.
+  * YouTube play and state events are unreliable enough that fade-ins are polled
+    from tick() instead of trusted to fire.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prompt Track. A caption track for doing, not just watching.</title>
+<meta name="description" content="A reference player for prompt tracks. Timestamped, creator authored AI companion cues attached to an ordinary video, toggleable like captions. Pairs with Claude Desktop over MCP.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --carbon:#0e1116; --slate:#161b22; --slate-2:#1c232d; --line:#28303c;
+  --text:#e8edf2; --muted:#8b96a5; --fg:#e8edf2;
+  --cyan:#35d6e8; --purple:#9d7bff; --amber:#ffc24b; --green:#4ade80;
+  --amber-dim:rgba(255,194,75,.14); --cyan-dim:rgba(53,214,232,.12);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --disp:'Space Grotesk',sans-serif; --body:'Inter',system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--carbon);color:var(--text);font-family:var(--body);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+button{font-family:inherit;cursor:pointer}
+a{color:var(--cyan)}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 28px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.wordmark{font-family:var(--disp);font-weight:700;font-size:20px;letter-spacing:.02em}
+.wordmark .p{color:var(--cyan)}.wordmark .t{color:var(--purple)}
+.wordmark small{display:block;font-family:var(--body);font-weight:400;font-size:12px;color:var(--muted)}
+.mode{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--slate)}
+.header-actions{display:flex;align-items:center;gap:10px}
+.editor-link{display:inline-flex;align-items:center;padding:9px 16px;border:1px solid var(--line);border-radius:10px;background:var(--slate);color:var(--muted);font-family:var(--disp);font-size:13.5px;font-weight:600;text-decoration:none;transition:border-color .15s,color .15s}
+.editor-link:hover{border-color:var(--cyan);color:var(--cyan)}
+.mode button{padding:9px 18px;background:transparent;border:0;color:var(--muted);font-size:13.5px;font-weight:600;font-family:var(--disp)}
+.mode button[aria-pressed="true"]{color:var(--carbon)}
+.mode button[data-mode="lean"][aria-pressed="true"]{background:var(--purple)}
+.mode button[data-mode="lab"][aria-pressed="true"]{background:var(--cyan)}
+
+main{display:grid;grid-template-columns:minmax(0,2fr) minmax(330px,1fr);gap:22px;padding:22px 28px;max-width:1340px;margin:0 auto}
+@media(max-width:980px){main{grid-template-columns:1fr}}
+
+.frame{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#000;transition:box-shadow .3s}
+.frame.cue-live{box-shadow:0 0 0 1px var(--amber),0 0 34px rgba(255,194,75,.18)}
+.ratio{position:relative;padding-top:56.25%}
+.no-track{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--carbon);border-radius:12px;padding:24px}
+.no-track .nt-inner{max-width:440px;text-align:center}
+.no-track h2{font-family:var(--disp);font-size:22px;font-weight:600;color:var(--fg);margin:0 0 10px}
+.no-track p{font-size:14px;color:var(--text);line-height:1.5;margin:0 0 10px}
+.no-track .nt-sub{font-size:12.5px;color:var(--muted)}
+.ratio iframe,#player{position:absolute;inset:0;width:100%;height:100%;border:0}
+.scrim{position:absolute;inset:0;background:rgba(14,17,22,.55);opacity:0;pointer-events:none;transition:opacity .3s;display:flex;align-items:flex-end;padding:18px}
+.frame.cue-live .scrim{opacity:1}
+.scrim .flag{font-family:var(--disp);font-weight:600;font-size:13px;color:var(--carbon);background:var(--amber);border-radius:8px;padding:6px 12px}
+.branch-overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(10,13,17,.82);backdrop-filter:blur(3px);z-index:5}
+.branch-overlay.show{display:flex}
+.branch-card{max-width:560px;width:100%;max-height:100%;overflow-y:auto;background:var(--slate);border:1px solid var(--line);border-radius:14px;padding:22px 22px 18px;box-shadow:0 18px 60px rgba(0,0,0,.5)}
+.branch-card .bc-tag{font-family:var(--disp);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--cyan);margin-bottom:8px}
+.branch-card h3{font-family:var(--disp);font-size:19px;font-weight:600;margin:0 0 6px;color:var(--fg)}
+.branch-card p{font-size:14px;color:var(--muted);margin:0 0 16px;line-height:1.5}
+.branch-card .bc-opts{display:flex;flex-direction:column;gap:8px}
+.branch-card .bc-opt{text-align:left;padding:11px 14px;border:1px solid var(--line);border-radius:9px;background:var(--slate-2);color:var(--fg);font-size:14px;cursor:pointer;transition:border-color .15s,background .15s}
+.branch-card .bc-opt:hover{border-color:var(--cyan);background:var(--cyan-dim)}
+.branch-card .bc-opt.done{border-color:var(--purple);color:var(--muted)}
+.branch-card .bc-opt .bc-check{color:var(--purple);margin-right:6px;font-weight:700}
+.branch-card .bc-proceed{margin-top:14px;padding:11px 14px;width:100%;border:1px solid var(--cyan);border-radius:9px;background:var(--cyan);color:var(--carbon);font-family:var(--disp);font-weight:600;font-size:14px;letter-spacing:.03em;cursor:pointer}
+.branch-card .bc-proceed:hover{filter:brightness(1.08)}
+/* on-video note caption */
+.note-cap{position:absolute;left:0;right:0;bottom:0;display:none;flex-direction:column;gap:6px;padding:16px 18px;background:linear-gradient(transparent,rgba(8,10,14,.86));z-index:4;pointer-events:none}
+/* fade cover: masks the loading stutter between clips */
+.still-layer{position:absolute;inset:0;display:none;z-index:5;background:#000;border-radius:12px;overflow:hidden}
+.still-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.still-cap{position:absolute;left:0;right:0;bottom:0;padding:14px 18px;font-size:14px;color:var(--fg);background:linear-gradient(transparent,rgba(8,10,14,.85));text-align:center}
+.fade-cover{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;z-index:6;transition:opacity var(--fade-ms,450ms) ease}
+.fade-cover.on{opacity:1}
+.note-cap.show{display:flex}
+.note-cap .nc{align-self:flex-start;max-width:80%;background:rgba(18,22,28,.9);border:1px solid var(--line);border-left:3px solid var(--cyan);border-radius:8px;padding:8px 12px;font-size:14px;color:var(--fg);line-height:1.4}
+.note-cap .nc b{color:var(--cyan);font-weight:600;margin-right:6px}
+/* materials sidebar */
+.materials{border:1px solid var(--line);border-radius:12px;background:var(--slate);overflow:hidden;flex:1;display:flex;flex-direction:column;min-height:0}
+.materials-head{font-family:var(--disp);font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--line);background:var(--slate-2);flex:0 0 auto}
+.materials-head span{color:var(--cyan);margin-left:6px}
+.materials-list{flex:1 1 auto;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px}
+.materials-empty{font-size:12.5px;color:var(--muted);padding:8px;margin:0}
+.mat{border:1px solid var(--line);border-radius:10px;background:var(--slate-2);padding:11px 12px}
+.mat .mat-tag{font-family:var(--disp);font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px}
+.mat.note .mat-tag{color:var(--cyan)}
+.mat.task .mat-tag{color:var(--amber)}
+.mat.quiz .mat-tag{color:var(--purple)}
+/* current material holds focus; stale ones grey out */
+.mat{transition:opacity .25s,border-color .25s,box-shadow .25s;position:relative}
+.mat.current{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan),0 6px 22px rgba(0,0,0,.35)}
+.mat.stale{opacity:.42;filter:saturate(.6)}
+.mat.stale:hover{opacity:.7}
+.mat.stale .mat-tag{opacity:.85}
+/* page-id chip in the panel head */
+.pageid{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--slate-2);color:var(--fg);border-radius:999px;padding:4px 10px 4px 9px;font-family:var(--mono);font-size:12px;cursor:pointer;transition:border-color .2s}
+.pageid:hover{border-color:var(--cyan)}
+.pageid .pageid-dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 6px var(--cyan)}
+.pageid.offline .pageid-dot{background:var(--muted);box-shadow:none}
+.pageid .pageid-copy{font-family:var(--disp);font-size:9.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-left:2px}
+.pageid.copied{border-color:var(--cyan)}
+.pageid.copied .pageid-copy{color:var(--cyan)}
+.mat h4{font-family:var(--disp);font-size:14px;font-weight:600;margin:0 0 5px;color:var(--fg)}
+.mat p{font-size:13px;color:var(--muted);margin:0 0 8px;line-height:1.45}
+.mat .mat-ask{font-size:12.5px;color:var(--fg);background:var(--carbon);border:1px dashed var(--line);border-radius:8px;padding:8px 10px;margin:8px 0}
+.mat .mat-ask b{color:var(--cyan);font-weight:600}
+.mat .mat-btns{display:flex;gap:7px;flex-wrap:wrap}
+.mat .mat-btn{font-family:var(--disp);font-size:12px;font-weight:600;border:1px solid var(--line);border-radius:7px;background:var(--slate);color:var(--fg);padding:6px 11px;cursor:pointer}
+.mat .mat-btn:hover{border-color:var(--cyan)}
+.mat .mat-btn.copied{border-color:var(--cyan);color:var(--cyan)}
+/* simple code block for tasks */
+.codeblock{border:1px solid var(--line);border-radius:8px;background:var(--carbon);margin:8px 0;overflow:hidden}
+.codeblock .cb-head{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--slate-2)}
+.codeblock .cb-name{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.codeblock .cb-lang{font-family:var(--disp);font-size:9.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--purple);margin-left:auto}
+.codeblock pre{margin:0;padding:10px 12px;overflow:auto;max-height:240px}
+.codeblock code{font-family:var(--mono);font-size:12.5px;line-height:1.5;color:var(--cyan);white-space:pre}
+.codeblock .cb-copy{font-family:var(--disp);font-size:11px;font-weight:600;border:0;border-top:1px solid var(--line);background:var(--slate-2);color:var(--fg);padding:6px 10px;cursor:pointer;width:100%;text-align:left}
+.codeblock .cb-copy:hover{color:var(--cyan)}
+
+.rail-wrap{margin-top:14px;border:1px solid var(--line);border-radius:12px;background:var(--slate);padding:14px 18px 10px}
+.rail-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:10px}
+.rail-head h2{font-family:var(--disp);font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.rail-head h2 b{color:var(--cyan);font-weight:600}
+#clock{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+.rail{position:relative;height:34px}
+.tl-strip{display:flex;align-items:stretch;gap:4px;margin-bottom:10px;flex-wrap:wrap;min-height:26px}
+.tl-crumb{display:flex;align-items:center;gap:4px;width:100%;font-size:11px;color:var(--muted);letter-spacing:.04em;margin-bottom:2px}
+.tl-crumb b{color:var(--cyan);font-weight:600}
+.tl-node{flex:1 1 auto;min-width:34px;max-width:220px;padding:4px 8px;border:1px solid var(--line);border-radius:7px;background:var(--slate-2);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
+.tl-node.clip::before{content:"";width:0;height:0;border-left:6px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;opacity:.7}
+.tl-node.branch::before{content:"";width:8px;height:8px;border:2px solid currentColor;border-radius:50%;opacity:.7}
+.tl-node.end::before{content:"";width:8px;height:8px;background:currentColor;border-radius:2px;opacity:.7}
+.tl-node.active{border-color:var(--cyan);color:var(--fg);background:var(--cyan-dim);box-shadow:0 0 0 1px var(--cyan)}
+.tl-node.done{border-color:var(--purple);color:var(--fg)}
+.rail-line{position:absolute;left:0;right:0;top:16px;height:2px;background:var(--line)}
+.rail-prog{position:absolute;left:0;top:16px;height:2px;width:0;background:linear-gradient(90deg,var(--purple),var(--cyan));transition:width .25s linear}
+.cue-mark{position:absolute;top:9px;width:16px;height:16px;transform:translateX(-50%) rotate(45deg);background:var(--slate-2);border:2px solid var(--muted);border-radius:3px;cursor:pointer}
+.cue-mark:hover{border-color:var(--cyan)}
+.cue-mark.passed{border-color:var(--cyan);background:var(--cyan-dim)}
+.cue-mark.live{border-color:var(--amber);background:var(--amber);animation:pulse 1.4s ease-in-out infinite}
+.cue-mark.dormant{opacity:.35}
+.cue-dot{position:absolute;top:12px;width:9px;height:9px;transform:translateX(-50%);border-radius:50%;background:var(--purple);border:0;padding:0;opacity:.75;cursor:pointer}
+.cue-dot:hover{opacity:1;box-shadow:0 0 0 4px rgba(157,123,255,.2)}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,194,75,.5)}50%{box-shadow:0 0 0 7px rgba(255,194,75,0)}}
+.rail-legend{display:flex;gap:18px;margin-top:8px;font-size:11.5px;color:var(--muted);flex-wrap:wrap;align-items:center}
+.rail-legend span{display:inline-flex;align-items:center;gap:6px}
+.mk{width:10px;height:10px;display:inline-block}
+.mk-note{background:var(--cyan);border-radius:2px}
+.mk-task{background:var(--amber);border-radius:2px;transform:rotate(45deg)}
+.mk-quiz{background:var(--purple);border-radius:50%}
+.mk-ctx{width:8px;height:8px;background:transparent;border:2px solid var(--muted);border-radius:50%}
+.mk-branch{width:10px;height:10px;background:var(--green);clip-path:polygon(50% 0%, 100% 100%, 0% 100%)}
+.speed{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted)}
+.speed select{font-family:var(--disp);font-size:12px;font-weight:600;color:var(--fg);background:var(--slate-2);border:1px solid var(--line);border-radius:7px;padding:4px 7px;cursor:pointer}
+.speed select:hover{border-color:var(--cyan)}
+/* rail cue markers, positioned within the current clip */
+.railcue{position:absolute;top:8px;width:12px;height:12px;transform:translateX(-50%);cursor:pointer;padding:0;border:0;background:transparent;z-index:3}
+.railcue i{display:block;width:100%;height:100%}
+.railcue.note i{background:var(--cyan);border-radius:2px}
+.railcue.task i{background:var(--amber);border-radius:2px;transform:rotate(45deg)}
+.railcue.quiz i{background:var(--purple);border-radius:50%}
+.railcue.context i{background:transparent;border:2px solid var(--muted);border-radius:50%;box-sizing:border-box}
+.railcue.branch i{background:var(--green);border-radius:1px;clip-path:polygon(50% 0%, 100% 100%, 0% 100%)}
+.railcue.branch:hover i{background:var(--cyan)}
+.railcue:hover i{box-shadow:0 0 0 4px rgba(94,234,212,.18)}
+.railcue.passed i{opacity:.4}
+.railcue.live i{box-shadow:0 0 0 4px rgba(255,194,75,.35);animation:pulse 1.4s ease-in-out infinite}
+.dot{width:9px;height:9px;transform:rotate(45deg);border-radius:2px;display:inline-block}
+.dot.d1{border:2px solid var(--muted)}.dot.d2{background:var(--cyan)}.dot.d3{background:var(--amber)}
+
+.loader{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:var(--slate);padding:16px 18px}
+.loader h3{font-family:var(--disp);font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.loader-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.loader input[type=url]{flex:1;min-width:220px;background:var(--carbon);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13.5px;font-family:var(--mono)}
+.btn{background:var(--slate-2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:9px 16px;font-size:13.5px;font-weight:600}
+.btn:hover{border-color:var(--cyan)}
+.btn.primary{background:var(--cyan);border-color:var(--cyan);color:var(--carbon)}
+.loader .note{margin-top:9px;font-size:12.5px;color:var(--muted)}
+.loader .note code{font-family:var(--mono);font-size:12px;color:var(--cyan)}
+
+.panel{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:14px;background:var(--slate);min-height:600px;max-height:calc(100vh - 130px);position:sticky;top:20px;transition:border-color .3s,box-shadow .3s}
+@media(max-width:980px){.panel{position:static;max-height:none}}
+.panel.cue-live{border-color:var(--amber);box-shadow:0 0 26px rgba(255,194,75,.12)}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.panel-head h2{font-family:var(--disp);font-size:15px;font-weight:600}
+.pill{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.pill.on{color:var(--cyan);border-color:var(--cyan)}
+
+.pairbox{padding:14px 18px;border-bottom:1px solid var(--line)}
+.check{display:flex;gap:11px;align-items:flex-start;padding:6px 0}
+.check b{font-size:13.5px;font-weight:600;display:block}
+.chkNote{font-size:12px;color:var(--muted);display:block;margin-top:1px}
+.tick{flex:0 0 auto;width:15px;height:15px;margin-top:3px;border-radius:50%;border:2px solid var(--muted);transition:background .25s,border-color .25s}
+.check.on .tick{background:var(--cyan);border-color:var(--cyan)}
+.check.live .tick{background:var(--amber);border-color:var(--amber);animation:pulse 1.4s ease-in-out infinite}
+.check.off .tick{border-color:#ff7b7b}
+.paircode-inline{font-family:var(--mono);font-size:14px;font-weight:600;letter-spacing:.1em;color:var(--amber)}
+.fingerprint{font-size:12px;color:var(--muted)}
+.fingerprint b{color:var(--purple);font-weight:600}
+.pairbox .btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+
+.msg{max-width:94%;border-radius:12px;padding:12px 15px;font-size:14px;line-height:1.55;white-space:pre-wrap;word-wrap:break-word}
+.msg.companion{background:var(--slate-2);border:1px solid var(--line);align-self:flex-start}
+.msg.companion.cue{border-color:var(--amber);background:var(--amber-dim)}
+.msg.claude{background:var(--cyan-dim);border:1px solid rgba(53,214,232,.35);align-self:flex-start}
+.msg.user{background:var(--slate-2);border:1px solid var(--line);align-self:flex-end}
+.viaTag{display:block;font-family:var(--disp);font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--cyan);margin-bottom:5px}
+.composer{display:flex;gap:9px;padding:13px 16px;border-top:1px solid var(--line)}
+.composer input{flex:1;background:var(--carbon);border:1px solid var(--line);border-radius:9px;color:var(--text);padding:10px 13px;font-size:14px}
+.composer input::placeholder{color:var(--muted)}
+.msg.system{align-self:center;background:transparent;color:var(--muted);font-size:12.5px;text-align:center;padding:2px 8px}
+.msg.section{background:transparent;border:1px solid var(--line);border-left:3px solid var(--purple);align-self:flex-start;font-size:13px;color:var(--muted);padding:9px 13px}
+.msg.section b{display:block;font-family:var(--disp);font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--purple);margin-bottom:3px}
+.msg .cue-tag{display:inline-block;font-family:var(--disp);font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
+.codeblock{position:relative;margin-top:10px;background:var(--carbon);border:1px solid var(--line);border-radius:8px;padding:11px 13px;font-family:var(--mono);font-size:13px;color:var(--cyan);overflow-x:auto;white-space:pre}
+.artifact{margin-top:12px;border:1px solid var(--line);border-radius:10px;background:var(--carbon);overflow:hidden}
+.artifact-head{display:flex;align-items:center;gap:10px;padding:7px 11px;border-bottom:1px solid var(--line);background:var(--slate-2)}
+.artifact-head .fname{font-family:var(--mono);font-size:12px;color:var(--text)}
+.artifact-head .lang{font-family:var(--disp);font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--purple);margin-left:auto}
+.artifact textarea{display:block;width:100%;background:transparent;border:0;resize:vertical;color:var(--cyan);font-family:var(--mono);font-size:13px;line-height:1.5;padding:11px 13px;min-height:52px}
+.artifact textarea:focus{outline:none;background:rgba(53,214,232,.04)}
+.artifact-foot{display:flex;gap:8px;padding:8px 11px;border-top:1px solid var(--line);flex-wrap:wrap;align-items:center}
+.artifact-foot .edited{font-size:11px;color:var(--amber);margin-left:auto;display:none}
+.artifact.dirty .edited{display:inline}
+.mini{font-size:11.5px;font-weight:600;padding:5px 11px;border-radius:6px;border:1px solid var(--line);background:var(--slate-2);color:var(--muted)}
+.mini:hover{color:var(--text);border-color:var(--cyan)}
+.varrow{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
+.varrow input{flex:1;min-width:150px;background:var(--carbon);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px 11px;font-family:var(--mono);font-size:13px}
+.varrow input.invalid{border-color:#ff7b7b}
+.copy{position:absolute;top:7px;right:7px;font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid var(--line);background:var(--slate-2);color:var(--muted)}
+.copy:hover{color:var(--text);border-color:var(--cyan)}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px}
+.chip{font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:999px;border:1px solid var(--line);background:var(--slate-2);color:var(--text)}
+.chip.playpause{min-width:66px;border-color:var(--cyan);color:var(--cyan)}
+.chip.playpause.is-playing{background:var(--cyan);color:var(--carbon);border-color:var(--cyan)}
+.chip.playpause.is-disabled,.chip.playpause:disabled{opacity:.4;cursor:not-allowed;border-color:var(--line);color:var(--muted);background:var(--slate-2)}
+.chip:hover{border-color:var(--cyan)}
+.chip.resume{background:var(--amber);border-color:var(--amber);color:var(--carbon)}
+
+.explain{max-width:1340px;margin:8px auto 46px;padding:0 28px;display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+@media(max-width:980px){.explain{grid-template-columns:1fr}}
+.card{border:1px solid var(--line);border-radius:12px;background:var(--slate);padding:18px}
+.card h3{font-family:var(--disp);font-size:14px;font-weight:600;margin-bottom:8px}
+.card h3 span{color:var(--cyan);font-family:var(--mono);font-size:12px;margin-right:8px}
+.card p{font-size:13.5px;color:var(--muted)}
+footer{border-top:1px solid var(--line);padding:18px 28px;font-size:12.5px;color:var(--muted);display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark"><span class="p">Prompt</span><span class="t">Track</span>
+    <small>A caption track for doing, not just watching.</small>
+  </div>
+  <div class="header-actions">
+    <div class="mode" role="group" aria-label="Viewing mode">
+      <button data-mode="lean" aria-pressed="false" onclick="setMode('lean')">Lean back</button>
+      <button data-mode="lab" aria-pressed="true" onclick="setMode('lab')">Lab mode</button>
+    </div>
+    <a class="editor-link" href="/editor.html" target="_blank" rel="noopener" title="Open the track editor in a new tab">Editor</a>
+  </div>
+</header>
+
+<main>
+  <section class="stage">
+    <div class="frame" id="frame">
+      <div class="ratio"><div id="player"></div></div>
+      <div class="scrim"><span class="flag">Paused by the track. Your turn.</span></div>
+      <div class="note-cap" id="noteCap" aria-live="polite"></div>
+      <div class="branch-overlay" id="branchOverlay" aria-live="polite"></div>
+      <div class="still-layer" id="stillLayer" aria-hidden="true"></div>
+      <div class="fade-cover" id="fadeCover" aria-hidden="true"></div>
+    </div>
+
+    <div class="rail-wrap">
+      <div class="rail-head">
+        <h2>Prompt track <b id="railState">armed</b></h2>
+        <span id="clock">0:00 / 0:00</span>
+      </div>
+      <div id="tlStrip" class="tl-strip"></div>
+      <div class="rail" id="rail">
+        <div class="rail-line"></div>
+        <div class="rail-prog" id="railProg"></div>
+      </div>
+      <div class="rail-legend">
+        <span><i class="mk mk-note"></i>Note</span>
+        <span><i class="mk mk-task"></i>Task</span>
+        <span><i class="mk mk-quiz"></i>Quiz</span>
+        <span><i class="mk mk-branch"></i>Branch</span>
+        <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center">
+          <span class="speed" id="speedCtl" title="Playback speed"></span>
+          <button class="chip playpause" id="playPause" onclick="togglePlay()" title="Play or pause" aria-label="Play or pause">Play</button>
+          <button class="chip" onclick="skipBack()" title="Jump to the previous cue">&laquo; Back</button>
+          <button class="chip" onclick="skipToNext()" title="Jump to the next cue or clip">Skip ahead &raquo;</button>
+          <button class="chip" onclick="resetTrack()">Reset track</button>
+        </span>
+      </div>
+    </div>
+
+    <div class="loader">
+      <h3>Load a track</h3>
+      <div class="loader-row">
+        <input type="url" id="trackUrl" value="" placeholder="https://... URL of a track JSON file" aria-label="URL of a track JSON file">
+        <button class="btn" onclick="loadTrackFromUrl()">Load from URL</button>
+        <button class="btn" onclick="document.getElementById('trackFile').click()">Load from file</button>
+        <input type="file" id="trackFile" accept=".json,application/json" hidden onchange="loadTrackFromFile(this.files[0])">
+      </div>
+      <p class="note">The player ships empty, no track is included. A track is one JSON file that overlays timing, cues and an AI persona onto YouTube videos. Load one from a URL or a local file to begin, or author your own and share the file so others can load it here. The videos themselves are never modified.</p>
+    </div>
+  </section>
+
+  <aside class="panel" id="panel">
+    <div class="panel-head">
+      <h2>Companion</h2>
+      <button class="pageid" id="pageIdChip" title="Copy this page's name" onclick="copyPageId()"><span class="pageid-dot"></span><span id="fingerprint">...</span><span class="pageid-copy">copy</span></button>
+    </div>
+
+    <div class="materials" id="materials" aria-live="polite">
+      <div class="materials-head">Materials <span id="materialsCount"></span></div>
+      <div class="materials-list" id="materialsList"><p class="materials-empty">Notes, tasks and quizzes appear here as the track plays.</p></div>
+    </div>
+  </aside>
+</main>
+
+<section class="explain">
+  <div class="card"><h3><span>01</span>Reuse what already exists</h3><p>Take any YouTube videos and cut, splice and reorder them into something new. Build a course, a lesson, a guided watch-along or a comedy edit from footage that is already out there, without reshooting a single frame or re-hosting anything.</p></div>
+  <div class="card"><h3><span>02</span>Video that talks back</h3><p>Your edit does not just play, it converses. Claude sits beside it through the MCP, seeing exactly where the viewer is, and answers questions, runs quizzes and explains the moment. Content that speaks to the viewer and speaks back.</p></div>
+  <div class="card"><h3><span>03</span>An instructor built in</h3><p>Give Claude a persona and your reused footage gains a host, a tutor or a collaborator. Viewers explore any question or idea in that voice, turning passive clips into a two-way experience you author once and anyone can step into.</p></div>
+</section>
+
+<footer>
+  <span>Prompt Track reference player <b style="color:var(--cyan)">build v0.70 branchcues</b>. A pattern proposal by Richard Hall.</span>
+  <span>Video never modified. Track is a sidecar. Learner does all the work.</span>
+</footer>
+
+<script>
+/* ===================== state =====================
+   Module-level state, all of it. There is no framework and no store: the page is
+   small enough that plain variables read more clearly than a state container, but
+   it does mean these are shared by everything below, so mutate them deliberately.
+
+   track       the loaded track JSON (meta + flat cues array)
+   player      the YouTube iframe API player object
+   mode        'lab' pauses at cues; the other mode plays straight through
+   fired       cue ids already triggered, so a cue fires once per pass
+   activeCue   the cue currently holding the floor, or null
+   learner     {os, comfort} from the calibration questions
+   ws          the socket to the server (see connectWs)
+================================================================== */
+let track = null;
+let player = null, playerReady = false, duration = 0;
+let mode = 'lab';
+let fired = new Set();
+let activeCue = null;
+let learner = { os: null, comfort: null };
+let calibrated = false;
+let calibrationThen = null;
+let pollTimer = null;
+let ws = null, fingerprint = null, serverMode = 'docker';
+let lastPlaybackSent = 0;
+
+/* ---- timing tolerances (ms-accurate) ----
+   The tick poll runs every 250ms, so a firing window must be at least one poll
+   wide to avoid being skipped, but no wider than needed. These are the only
+   sub-second guards in the player. All values are in seconds. */
+const POLL_S      = 0.25;          // tick() interval
+const FIRE_WINDOW = POLL_S + 0.02; // a cue fires if t is within this of its cue.t
+const SEG_EPS     = 0.05;          // segment boundary tolerance (was 0.3)
+const ADV_EPS     = 0.03;          // auto-advance a hair before a segment's end
+const REARM_BACK  = POLL_S * 2;    // re-arm a passed cue once t is this far behind it
+
+/* ===================== websocket to the server ===================== */
+/**
+ * Open the socket to the server and keep it open.
+ *
+ * Inbound frames are commands from Claude; outbound frames are status (see send).
+ * Reconnects on close after three seconds, unconditionally, because the common
+ * cause is the server restarting under it and the viewer should not have to
+ * refresh. The page-id chip greys out while disconnected so the state is visible.
+ */
+function connectWs(){
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(proto + location.host + '/ws');
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    switch(msg.type){
+      case 'hello':
+        fingerprint = msg.sessionFingerprint; serverMode = msg.mode || 'docker';
+        document.getElementById('fingerprint').textContent = fingerprint;
+        break;
+      case 'arranged':
+        addMsg('system', msg.note || (msg.ok ? 'Windows arranged.' : 'Could not arrange automatically.'));
+        break;
+      case 'resume': resumeFromCue(true); break;
+      case 'pause': if(playerReady) player.pauseVideo(); break;
+      case 'seek':
+        if(!playerReady || !Number.isFinite(msg.seconds)) break;
+        if(msg.video && msg.video!==currentVideoKey){ switchVideo(msg.video, msg.seconds, ytStateName()==='playing'); }
+        else { player.seekTo(Math.max(0,msg.seconds), true); }
+        resyncCursor();
+        break;
+      case 'clip':
+        if(!playerReady) break;
+        segment = msg.until ? { video: msg.video||mainKey, until: Number(msg.until), ret: (msg.ret && msg.ret.video) ? msg.ret : null } : null;
+        switchVideo(msg.video||mainKey, Number(msg.seconds)||0, true);
+        break;
+    }
+  };
+  ws.onclose = () => {
+    const chip = document.getElementById('pageIdChip');
+    if(chip) chip.classList.add('offline');
+    setTimeout(connectWs, 3000);
+  };
+}
+
+/**
+ * Send a frame to the server, or drop it silently if the socket is not open.
+ *
+ * Dropping is correct here: everything sent is a status report, and a stale one
+ * delivered after a reconnect would be worse than a missing one. readyState 1 is OPEN.
+ */
+function send(obj){ if(ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+function requestFreshCode(){ send({type:'request_code'}); }
+
+/**
+ * Put the player on the right half of the screen and Claude Desktop on the left.
+ *
+ * Two halves of one job. The server is asked to move the Claude window (it is the
+ * only side that can run OS commands), and the page opens itself in a new window
+ * sized to the other half. The original tab is then replaced with a short
+ * explanation rather than left showing a duplicate player, which would leave two
+ * live sessions and make Claude ask which one the viewer means.
+ *
+ * Popup blockers are the expected failure, hence the fallback message.
+ */
+function sideBySide(){
+  const sw = screen.availWidth, sh = screen.availHeight;
+  const sx = screen.availLeft || 0, sy = screen.availTop || 0;
+  const half = Math.floor(sw/2);
+  send({type:'arrange_windows', bounds:{ x:sx, y:sy, w:half, h:sh }});
+  const win = window.open(location.href, 'prompt-track-player',
+    'width='+half+',height='+sh+',left='+(sx+half)+',top='+sy);
+  if(win){
+    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:Inter,system-ui,sans-serif;color:#8b96a5;background:#0e1116;text-align:center;padding:20px">Carry on in the new player window on the right. Claude Desktop belongs on the left. You can close this tab.</div>';
+  } else {
+    addMsg('system','Your browser blocked the popup. Allow popups for this site and press the button again, or arrange the windows manually.');
+  }
+}
+
+/**
+ * Copy this page's fingerprint to the clipboard, with brief visual confirmation.
+ * Only needed when several player pages are open and Claude asks which is meant.
+ */
+function copyPageId(){
+  if(!fingerprint) return;
+  const chip = document.getElementById('pageIdChip');
+  const label = chip ? chip.querySelector('.pageid-copy') : null;
+  navigator.clipboard && navigator.clipboard.writeText(fingerprint).then(()=>{
+    if(label){ label.textContent='copied'; chip.classList.add('copied'); setTimeout(()=>{ label.textContent='copy'; chip.classList.remove('copied'); }, 1500); }
+  });
+}
+
+/* ===================== youtube ===================== */
+const tag = document.createElement('script');
+tag.src = "https://www.youtube.com/iframe_api";
+document.head.appendChild(tag);
+
+window.onYouTubeIframeAPIReady = function(){ if(track) createPlayer(startVideoId()); };
+
+setTimeout(()=>{ if(!window.YT || !YT.Player){
+  addMsg('system','The YouTube player API did not load. An ad blocker or privacy extension may be blocking it. Allow it for this site and refresh.');
+}}, 6000);
+
+const YT_ERRORS = {
+  2:'Invalid video ID. Check the id field in the track.',
+  5:'This video cannot play in the embedded HTML5 player.',
+  100:'Video not found. It may be private or deleted.',
+  101:'The owner of this video has disabled embedding.',
+  150:'The owner of this video has disabled embedding.'
+};
+
+let videosMap = {};        // key -> youtube id
+let lastContextShown = null;
+let timeline = null;       // root tree: array of nodes {type:'clip'|'branch'|'end', ...}
+let totalVirtual = 0;      // sum of top-level clip durations, for the rail (approx)
+let TL_DEBUG = false;      // tree diagnostics
+let treeStack = [];        // path stack of frames {arr, idx} while walking the tree
+let branchState = null;    // {node, done:Set, frame} while a branch holds the floor
+let mainKey = 'main';
+let currentVideoKey = null;
+let segment = null;        // {video, until, ret:{video,t}|null, tree:true for tree clips}
+
+// Build the tree. Every node carries an explicit `type`. clip: {video,from,to}.
+// branch: {select:'single'|'multi', require:'required'|'optional', options:[{label,timeline:[...]}]}.
+// end: {}. Nested timelines are arrays of the same node shape. We normalise numbers
+// and attach a stable path id for diagnostics, and compute a rough total duration
+// from top-level clips for the progress rail.
+function buildTimeline(t){
+  timeline = null; totalVirtual = 0; treeStack = [];
+  const root = t.meta.timeline;
+  if(!Array.isArray(root) || !root.length) return;
+  let vAcc = 0;
+  // Nested cues are collected here into a flat list as the tree is normalised, so the
+  // rest of the app (and the MCP server) keeps reading a flat track.cues array. Each
+  // nested cue gets a stable synthesised id from its parent node's path, a link_id set
+  // to the parent node's id, and (for clip cues) the parent's video copied on so the
+  // existing video+t firing path works unchanged.
+  const collectedCues = [];
+  const nodeId = (n, prefix, nodePath) => n.id || (prefix + nodePath);
+  const attachCue = (rawCue, parentNode, idx) => {
+    if(!rawCue || typeof rawCue !== 'object') return;
+    const synthId = rawCue.id || (parentNode.id + '::cue' + (idx==null?'':idx));
+    const cue = Object.assign({}, rawCue, {
+      id: synthId,
+      link_id: parentNode.id,
+      // Clip cues keep their t and inherit the clip's video so existing readers match
+      // on cueVideoKey===currentVideoKey. Hold cues have no t and no video.
+    });
+    if(parentNode.type === 'clip'){ cue.video = parentNode.video; }
+    else { delete cue.video; delete cue.t; }
+    collectedCues.push(cue);
+  };
+  const norm = (arr, path) => arr.map((n, i) => {
+    const nodePath = path + '/' + i;
+    const type = n.type || (n.options ? 'branch' : (n.video ? 'clip' : (n.end ? 'end' : 'clip')));
+    if(type === 'clip'){
+      const from = Number(n.from)||0, to = Number(n.to)||0;
+      const node = { type:'clip', id:nodeId(n,'c',nodePath), path:nodePath, video:n.video||mainKey, from, to, dur:Math.max(0,to-from),
+               transitionIn: n.transitionIn || null, transitionOut: n.transitionOut || null };
+      // Nested timestamped cues: clip.cues = [ {type,t,...}, ... ].
+      if(Array.isArray(n.cues)) n.cues.forEach((c, j) => attachCue(c, node, j));
+      return node;
+    }
+    if(type === 'hold'){
+      // A dummy node with no video that sits between clips purely to hold a cue in the
+      // seam. It presents its cue (pause/quiz/task) and advances when resolved. Its cue
+      // is nested as hold.cue = { type:'quiz'|'task'|..., ... } (no t needed).
+      const node = { type:'hold', id:nodeId(n,'h',nodePath), path:nodePath, dur:0,
+                     bg: n.bg || null };
+      if(n.cue) attachCue(n.cue, node, null);
+      return node;
+    }
+    if(type === 'still'){
+      // A still image shown in the video window for `hold` seconds, then faded out.
+      // `image` is an online URL. `fit` controls how it adjusts to the 16:9 window:
+      //   cover  = fill the window, cropping overflow (default)
+      //   contain= show the whole image, letterboxed to fit
+      //   fill   = stretch to the window, ignoring aspect ratio
+      const hold = Number(n.hold != null ? n.hold : n.holdSeconds) || 4;
+      const fit = ['cover','contain','fill'].includes(n.fit) ? n.fit : 'cover';
+      return { type:'still', id:nodeId(n,'s',nodePath), path:nodePath, dur:0,
+               image: String(n.image||''), hold, fit,
+               bg: n.bg || '#000', title:n.title||'', caption:n.caption||'',
+               transitionIn: n.transitionIn || null, transitionOut: n.transitionOut || null };
+    }
+    if(type === 'end'){
+      return { type:'end', id:nodeId(n,'e',nodePath), path:nodePath };
+    }
+    if(type === 'branch'){
+      const options = (n.options||[]).map((o, j) => ({
+        label: o.label || ('Option '+(j+1)),
+        timeline: norm(Array.isArray(o.timeline)? o.timeline : [], nodePath+'.opt'+j)
+      }));
+      return {
+        type:'branch', id:nodeId(n,'b',nodePath), path:nodePath,
+        select: (n.select==='single'?'single':'multi'),
+        require: (n.require==='required'?'required':'optional'),
+        title: n.title||'', intro: n.intro||'', options
+      };
+    }
+    return { type:'clip', id:'c'+nodePath, path:nodePath, video:mainKey, from:0, to:0, dur:0 };
+  });
+  timeline = norm(root, 'root');
+  // Merge collected nested cues into track.cues. If the track already had a flat cues
+  // array (legacy format), keep those too so old and new tracks both work.
+  const existingCues = Array.isArray(t.cues) ? t.cues : [];
+  t.cues = existingCues.concat(collectedCues);
+  // Rough total for the rail: sum of top-level clip durations.
+  for(const n of timeline){ if(n.type==='clip') vAcc += n.dur; }
+  totalVirtual = vAcc || 1;
+}
+
+// (Flat-timeline helpers removed. The tree engine tracks position via segment +
+// treeStack. The progress rail shows position within the current clip only.)
+function s2v(video, srcT){ return null; }
+function resyncCursor(){ /* no-op in the tree engine */ }
+
+/** Build the key-to-YouTube-id map from meta.videos and reset per-track playback state. */
+function resolveVideos(t){
+  videosMap = {}; segment = null; branchState = null;
+  if(t.meta.videos && Array.isArray(t.meta.videos) && t.meta.videos.length){
+    t.meta.videos.forEach((v,i)=>{ videosMap[v.key || ('video'+i)] = extractVideoId(v.id); });
+    mainKey = t.meta.videos[0].key || 'video0';
+  } else if(t.meta.video){
+    videosMap = { main: extractVideoId(t.meta.video.id) };
+    mainKey = 'main';
+  }
+  currentVideoKey = mainKey;
+  lastContextShown = null;
+  buildTimeline(t);
+}
+function mainVideoId(){ return videosMap[mainKey]; }
+// The video the player should open with: the first timeline clip's video if there is
+// a timeline, otherwise the main video. Prevents loading the wrong video first when
+// the opening clip uses a non-main video.
+/** The video id the player should open with, honouring a tree timeline's first clip. */
+function startVideoId(){
+  if(timeline && timeline.length){
+    const first = timeline.find(n => n.type==='clip');
+    if(first && videosMap[first.video]) return videosMap[first.video];
+  }
+  return mainVideoId();
+}
+/** Which video a cue belongs to. Cues omit `video` when they are on the main one. */
+function cueVideoKey(cue){ return cue.video || mainKey; }
+/** Human-readable title for a video key, falling back to the key itself. */
+function videoTitle(key){
+  if(track && track.meta.videos){ const v = track.meta.videos.find(x=>(x.key)===key); if(v && v.title) return v.title; }
+  return key;
+}
+
+// ---- Clip transitions (per-transition, fully self-contained) -------------
+// Each clip may carry `transitionOut` (how it fades away as it ends) and/or
+// `transitionIn` (how it fades up as it begins). The cut between clip A and clip B
+// uses A.transitionOut then B.transitionIn. Each transition object stands alone and
+// specifies its own timing, colour and whether sound fades:
+//   transitionOut: { ms, holdMs, color, audio }   (audio defaults true)
+//   transitionIn:  { ms, delayMs, color, audio }   (audio defaults true)
+// Absent => that half of the cut is instant. A transition with "enabled": false is
+// treated as absent. There is no global fallback; each transition is tailored.
+/**
+ * Normalise an author's transition spec into {ms, color, holdMs}.
+ *
+ * Authors write transitions loosely, so missing fields fall back to sensible
+ * defaults and every consumer downstream can assume a complete object.
+ *
+ * @param {object|null} o Raw transitionIn/transitionOut from the track.
+ * @param {'in'|'out'} kind Direction, which selects the defaults.
+ */
+function normTransition(o, kind){
+  if(!o || o.enabled === false) return null;
+  const spec = {
+    ms: Number.isFinite(o.ms) ? o.ms : 450,
+    color: o.color || '#000',
+    audio: o.audio !== false // audio fades unless explicitly false
+  };
+  if(kind === 'out') spec.holdMs = Number.isFinite(o.holdMs) ? o.holdMs : 0;
+  if(kind === 'in')  spec.delayMs = Number.isFinite(o.delayMs) ? o.delayMs : 0;
+  return spec;
+}
+function clipTransitionOut(node){ return normTransition(node && node.transitionOut, 'out'); }
+function clipTransitionIn(node){ return normTransition(node && node.transitionIn, 'in'); }
+let fadeAudioTimer = null;
+function setCoverColor(color){ const el=document.getElementById('fadeCover'); if(el) el.style.background = color || '#000'; }
+/**
+ * Fade the cover layer over the video in or out.
+ *
+ * The cover exists to hide the visual mess of switching clips: YouTube shows a
+ * black flash, a spinner and often a frame of the wrong video. Covering the window
+ * for the duration of the switch turns that into a clean cut.
+ */
+function fadeCoverTo(on, ms){
+  const el = document.getElementById('fadeCover'); if(!el) return;
+  el.style.setProperty('--fade-ms', (ms||450)+'ms');
+  // force style flush so the transition runs even when toggled rapidly
+  void el.offsetWidth;
+  el.classList.toggle('on', !!on);
+}
+// Ramp YouTube volume 0..100 over ms. YouTube has no native fade, so we step it.
+/**
+ * Ramp the player volume rather than cutting it.
+ *
+ * Paired with the visual fade, since an abrupt audio cut is more noticeable than
+ * an abrupt visual one. Stepped manually because the iframe API has no volume ramp.
+ */
+function fadeAudio(toVol, ms){
+  if(!player || !player.setVolume || !player.getVolume) return;
+  clearInterval(fadeAudioTimer);
+  let from; try{ from = player.getVolume(); }catch(e){ from = 100; }
+  if(player.isMuted && player.isMuted()) { /* keep muted state, still ramp underlying */ }
+  const steps = Math.max(1, Math.round(ms/40));
+  let i = 0;
+  fadeAudioTimer = setInterval(()=>{
+    i++;
+    const v = Math.round(from + (toVol - from) * (i/steps));
+    try{ player.setVolume(Math.max(0, Math.min(100, v))); }catch(e){}
+    if(i>=steps){ clearInterval(fadeAudioTimer); }
+  }, 40);
+}
+
+/**
+ * Move playback to a video in the track, optionally bounded by an end time.
+ *
+ * The endSeconds path matters: when a clip has a boundary, the video is LOADED
+ * with endSeconds so YouTube stops itself exactly there and fires its ended event.
+ * Polling for the boundary instead drifts by up to a poll interval and looks
+ * sloppy on a cut. The consequence is the reseek guard further down, since calling
+ * seekTo after such a load silently cancels the end bound.
+ *
+ * @param {string} key Video key from meta.videos.
+ * @param {number} t Start time in seconds within that video.
+ * @param {boolean} autoplay Play immediately, or cue and wait.
+ * @param {number} [endSeconds] Stop here. Omit for an unbounded play.
+ */
+function switchVideo(key, t, autoplay, endSeconds){
+  if(!videosMap[key]){ addMsg('system','This track has no video called "'+key+'".'); return; }
+  const hasEnd = Number.isFinite(endSeconds);
+  if(key === currentVideoKey && playerReady){
+    // Same video: seek within it. If an end is given, load with end bounds instead
+    // so YouTube stops itself precisely at the boundary and fires the ended event.
+    if(hasEnd){
+      player.loadVideoById(autoplay
+        ? { videoId: videosMap[key], startSeconds: Math.max(0,t), endSeconds }
+        : { videoId: videosMap[key], startSeconds: Math.max(0,t), endSeconds });
+    } else {
+      player.seekTo(Math.max(0,t), true);
+      if(autoplay) player.playVideo();
+    }
+    return;
+  }
+  currentVideoKey = key;
+  lastContextShown = null;
+  duration = 0;
+  if(playerReady){
+    const opts = hasEnd
+      ? { videoId: videosMap[key], startSeconds: Math.max(0,t), endSeconds }
+      : { videoId: videosMap[key], startSeconds: Math.max(0,t) };
+    if(autoplay) player.loadVideoById(opts);
+    else player.cueVideoById(opts);
+    // Only reseek when there is no endSeconds. Calling seekTo() after a load with
+    // endSeconds cancels the end bound in the YouTube API, which breaks the segment.
+    if(!hasEnd) reseekWhenReady(Math.max(0,t));
+  }
+  addMsg('system','Now on: '+videoTitle(key)+'.');
+}
+
+// After a cross-video load, YouTube snaps startSeconds to a keyframe. Poll briefly
+// for the new video to be ready, then seekTo the precise time with allowSeekAhead.
+let reseekTimer = null;
+/**
+ * Seek once the newly loaded video is actually ready to accept it.
+ *
+ * A seekTo issued immediately after loadVideoById is frequently ignored, since the
+ * player has not finished loading the new video. This retries until the position
+ * takes, rather than assuming the first attempt worked. Only used on unbounded
+ * loads; see the note in switchVideo.
+ */
+function reseekWhenReady(t){
+  if(reseekTimer){ clearInterval(reseekTimer); reseekTimer = null; }
+  let tries = 0;
+  reseekTimer = setInterval(()=>{
+    tries++;
+    if(!playerReady){ if(tries>20){ clearInterval(reseekTimer); reseekTimer=null; } return; }
+    const st = ytStateName();
+    if(st==='playing' || st==='paused' || st==='cued' || st==='buffering'){
+      player.seekTo(Math.max(0,t), true);
+      clearInterval(reseekTimer); reseekTimer = null;
+    } else if(tries>20){ clearInterval(reseekTimer); reseekTimer = null; }
+  }, 100);
+}
+
+// Enter timeline segment `idx`: the one place the timeline advances. It arms the
+// Move the top frame forward, ascending through parents whose arrays are exhausted.
+// When a frame that belongs to a branch option is exhausted, hand control back to
+// the branch: single-select commits forward (continue the parent after the branch),
+// multi-select returns to the branch card to pick again or proceed.
+function treeAdvance(autoplay=true, alreadyDark=false){
+  while(treeStack.length){
+    const frame = treeStack[treeStack.length-1];
+    frame.idx++;
+    if(frame.idx < frame.arr.length){ treeStep(autoplay, alreadyDark); return; }
+    // This frame's array is exhausted.
+    const finished = treeStack.pop();
+    if(finished.branchNode){
+      // An option's timeline just finished without an end node.
+      const node = finished.branchNode;
+      if(node.select==='single'){
+        // Commit forward: the branch is done, continue the parent after it.
+        continue; // pop already done; loop advances the parent frame next
+      } else {
+        // Multi: return to the branch to choose again or proceed. Restore the set of
+        // options already watched, which was parked on the node while one played.
+        branchState = branchState || { node, done: (node._doneOptions || new Set()) };
+        if(playerReady) player.pauseVideo();
+        renderTimelineStrip();
+        renderBranchCard(node);
+        return;
+      }
+    }
+    // Normal nested timeline finished: ascend and continue the parent.
+  }
+  treeEnd();
+}
+
+// Process the node the top frame currently points at.
+function treeStep(autoplay=true, alreadyDark=false){
+  if(!treeStack.length){ treeEnd(); return; }
+  const frame = treeStack[treeStack.length-1];
+  const node = frame.arr[frame.idx];
+  if(!node){ treeAdvance(autoplay, alreadyDark); return; }
+  if(TL_DEBUG) addMsg('system','[tl] step '+node.path+' type='+node.type);
+  renderTimelineStrip();
+  if(node.type==='end'){ treeEnd(); return; }
+  if(node.type==='hold'){ playTreeHold(node, autoplay, alreadyDark); return; }
+  if(node.type==='still'){ playTreeStill(node, autoplay, alreadyDark); return; }
+  if(node.type==='clip'){ playTreeClip(node, autoplay, alreadyDark); return; }
+  if(node.type==='branch'){ enterBranch(node); return; }
+  treeAdvance(autoplay, alreadyDark);
+}
+
+function treeEnd(){
+  segment = null; branchState = null; treeStack = [];
+  hideBranchOverlay();
+  clearStillImage();
+  renderTimelineStrip();
+  if(playerReady) player.pauseVideo();
+  addMsg('system','End of the track.');
+}
+
+// Play a HOLD node: a dummy node with no video that sits between clips purely to
+// present a cue (task/quiz) in the seam. It finds the cue bound to this hold (by
+// link_id, resolved into the flat track.cues at load), fires it (which pauses and
+// holds the floor), and when the viewer resolves it, resumeFromCue advances the tree.
+// The screen shows whatever the previous clip faded to (usually black), or the hold's
+// own bg colour if set.
+function playTreeHold(node, autoplay=true, alreadyDark=false){
+  hideBranchOverlay();
+  clearStillImage();
+  // A hold is silent: pause and mute the underlying player so nothing bleeds through.
+  if(playerReady){ try{ player.pauseVideo(); }catch(e){} try{ player.setVolume(0); }catch(e){} }
+  // Optional backdrop: if the hold sets a bg, cover the frame in it; else leave whatever
+  // the previous clip's fade-out left (black, typically).
+  if(node.bg){ setCoverColor(node.bg); fadeCoverTo(true, 0); }
+  segment = { hold:true, tree:true, node:node, dur:0, until:0 };
+  buildRail();
+  // Find the cue bound to this hold and present it.
+  const cue = track && Array.isArray(track.cues)
+    ? track.cues.find(c => c.link_id === node.id) : null;
+  if(cue && (cue.type==='task' || cue.type==='quiz' || cue.type==='do' || cue.type==='note')){
+    if(cue.type==='note'){
+      // A passive note in a hold: post to the sidebar and advance immediately (nothing
+      // to wait on, since a note never holds the floor).
+      fired.add(cue.id); markCue(cue.id,'passed'); addMaterial(cue);
+      send({type:'cue_fired', cueId: cue.id});
+      segment = null;
+      treeAdvance(true, alreadyDark);
+      return;
+    }
+    fireCue(cue); // task/quiz: pause and present; resumeFromCue advances the hold
+    return;
+  }
+  // No bound cue (or an unsupported type): nothing to hold on, just advance.
+  segment = null;
+  treeAdvance(true, alreadyDark);
+}
+
+// Play a clip node using the proven segment mechanism: load with endSeconds so
+// YouTube stops at `to` and fires ended, backed by the hard cutoff and the
+// short-video hold in tick(). segment.tree marks this as a tree clip so tick()
+// calls treeAdvance() when it finishes.
+function playTreeClip(node, autoplay=true, alreadyDark=false){
+  hideBranchOverlay();
+  clearStillImage();
+  const inSpec = clipTransitionIn(node);      // how THIS clip fades up
+  const doSwitch = ()=>{
+    segment = { video: node.video, until: node.to, ret: null, tree: true, node: node,
+                startedAt: Date.now(), dur: Math.max(0, node.to - node.from),
+                inSpec: inSpec, fadeIn: !!inSpec };
+    if(TL_DEBUG) addMsg('system','[tl] clip '+node.path+' '+node.video+' '+node.from+'->'+node.to);
+    switchVideo(node.video, node.from, autoplay, node.to);
+    // If this clip fades in, keep it silent under the cover until the fade-in ramps
+    // the sound up (YouTube resets volume to full on load).
+    if(inSpec && inSpec.audio){ try{ player.setVolume(0); }catch(e){} }
+    buildRail();
+  };
+
+  if(alreadyDark){
+    // The previous clip pre-faded its cover to its out-colour. The screen is already
+    // covered, so switch immediately under it. Do NOT change the cover colour here
+    // (that would flash a colour swap while opaque); the fade-in simply fades this
+    // cover's opacity away. If THIS clip has no transitionIn, reveal instantly.
+    doSwitch();
+    if(!inSpec){ fadeCoverTo(false, 0); if(player&&player.setVolume){ try{ player.setVolume(100);}catch(e){} } }
+    clearTimeout(playTreeClip._safety);
+    if(inSpec) playTreeClip._safety = setTimeout(fadeInIfPending, inSpec.ms + 4000);
+  } else if(inSpec && playerReady){
+    // No pre-fade from a previous clip (e.g. first clip, or a branch option start),
+    // but this clip wants a fade-in: cover in ITS OWN colour now, switch, then fade
+    // the opacity up when it plays.
+    setCoverColor(inSpec.color);
+    fadeCoverTo(true, 0);
+    doSwitch();
+    clearTimeout(playTreeClip._safety);
+    playTreeClip._safety = setTimeout(fadeInIfPending, inSpec.ms + 4000);
+  } else {
+    // No transition in either direction: plain switch, ensure cover is clear and the
+    // sound is up (a preceding still may have muted the player).
+    doSwitch();
+    fadeCoverTo(false, 0);
+    if(player&&player.setVolume){ try{ player.setVolume(100);}catch(e){} }
+  }
+}
+
+// Play a STILL node: an online image shown in the video window for `hold` seconds,
+// then faded out into the next node. It does not touch the YouTube player; it shows
+// an <img> overlay (respecting the author's `fit`), fades it in like a clip, holds it
+// via a wall-clock dwell in tick(), then pre-fades out and advances.
+// True if this still is the final playable node in its frame (nothing playable
+// follows it), so ending on it should leave the image up rather than clear it.
+/**
+ * Whether a still is the last node in the whole timeline.
+ *
+ * A terminal still stays on screen at the end rather than being cleared, which
+ * would drop the viewer back to a paused video frame and undo the intended ending.
+ */
+function stillIsTerminal(node){
+  if(!treeStack.length) return false;
+  const frame = treeStack[treeStack.length-1];
+  if(!frame || !Array.isArray(frame.arr)) return false;
+  const idx = frame.arr.indexOf(node);
+  if(idx < 0) return false;
+  for(let j = idx+1; j < frame.arr.length; j++){
+    const n = frame.arr[j];
+    if(n && (n.type==='clip' || n.type==='still' || n.type==='hold' || n.type==='branch')) return false;
+  }
+  // No playable node after it in this frame. Only terminal if this frame is the root
+  // (not inside a branch option that would ascend to a parent with more nodes).
+  return !frame.branchNode;
+}
+
+function playTreeStill(node, autoplay=true, alreadyDark=false){
+  hideBranchOverlay();
+  const inSpec = clipTransitionIn(node);
+  const showImage = ()=>{
+    segment = { still:true, tree:true, node:node, hold:node.hold,
+                startedAt: Date.now(), shownAt: Date.now(), dur:0,
+                inSpec: inSpec, fadeIn: !!inSpec, until: 0 };
+    // A still is silent: pause the underlying video and mute it so a clip we stepped
+    // back from (or forward into) does not play its sound under the image.
+    if(playerReady){ try{ player.pauseVideo(); }catch(e){} try{ player.setVolume(0); }catch(e){} }
+    renderStillImage(node);
+    if(TL_DEBUG) addMsg('system','[tl] still '+node.path+' image hold '+node.hold);
+    buildRail();
+  };
+  if(alreadyDark){
+    showImage();
+    if(!inSpec){ fadeCoverTo(false, 0); }
+    clearTimeout(playTreeClip._safety);
+    if(inSpec) playTreeClip._safety = setTimeout(fadeInIfPending, inSpec.ms + 4000);
+  } else if(inSpec && playerReady){
+    setCoverColor(inSpec.color);
+    fadeCoverTo(true, 0);
+    showImage();
+    clearTimeout(playTreeClip._safety);
+    playTreeClip._safety = setTimeout(fadeInIfPending, inSpec.ms + 4000);
+  } else {
+    showImage();
+    fadeCoverTo(false, 0);
+  }
+}
+// Render (or clear) the still image overlay in the video frame.
+/**
+ * Show a still image in the video window, or clear it when passed null.
+ * `fit` chooses between cover, contain and fill, per the track's spec.
+ */
+function renderStillImage(node){
+  const host = document.getElementById('stillLayer');
+  if(!host) return;
+  if(!node){ host.style.display='none'; host.innerHTML=''; return; }
+  host.style.display='block';
+  host.style.background = node.bg || '#000';
+  host.innerHTML = '';
+  const img = document.createElement('img');
+  img.className = 'still-img';
+  img.style.objectFit = node.fit || 'cover';
+  img.src = node.image;
+  img.alt = node.title || 'still';
+  host.appendChild(img);
+  if(node.caption){
+    const cap = document.createElement('div');
+    cap.className = 'still-cap';
+    cap.textContent = node.caption;
+    host.appendChild(cap);
+  }
+}
+function clearStillImage(){ renderStillImage(null); }
+// Lift the fade once the new clip/still is actually shown, using its own inSpec.
+/**
+ * Lift the cover once a freshly started clip is genuinely playing.
+ *
+ * Separated from the clip start because the moment to reveal is when frames are
+ * actually rendering, not when play was requested. Revealing too early shows the
+ * loading state the cover exists to hide.
+ */
+function fadeInIfPending(){
+  if(!segment || !segment.fadeIn) return;
+  segment.fadeIn = false;
+  const spec = segment.inSpec;
+  if(!spec){ fadeCoverTo(false, 0); return; }
+  // Delay is handled by maybeFadeInFromTick (wall-clock) before we get here, so fade now.
+  fadeCoverTo(false, spec.ms);
+  if(spec.audio) fadeAudio(100, spec.ms);
+}
+// Poll-driven fade-in trigger, called every tick. Fires the pending fade-in as soon
+// as the new clip is genuinely playing: its video is current and the playhead has
+// moved into the clip (or a short wall-clock grace has passed since the switch, to
+// cover cases where position reporting lags). Never depends on the play event.
+// The delay before the fade is measured here against wall-clock too, so the reveal
+// does not depend on a setTimeout that a stalled tab might defer.
+/**
+ * Poll-driven backstop for the fade-in.
+ *
+ * The YouTube play event is not reliably delivered, and a missed one would leave
+ * the cover up over a playing video, which looks like a hang. Checking from tick
+ * as well means the reveal always happens even when the event does not.
+ */
+function maybeFadeInFromTick(t){
+  if(!segment || !segment.fadeIn) return;
+  if(segment.still){
+    // A still has no playhead; it is "shown" as soon as its dwell has started.
+    if(!segment.shownAt) return;
+    if(!segment.fadeInReadyAt) segment.fadeInReadyAt = Date.now();
+    const spec = segment.inSpec;
+    const delay = spec && spec.delayMs > 0 ? spec.delayMs : 0;
+    if(Date.now() - segment.fadeInReadyAt >= delay) fadeInIfPending();
+    return;
+  }
+  if(currentVideoKey !== segment.video) return; // new video not active yet
+  const from = segment.until - (segment.dur || 0);
+  const started = Number.isFinite(t) && t >= from - 0.25;      // playhead is in the clip
+  const graced = segment.startedAt && (Date.now() - segment.startedAt) > 400; // fallback
+  if(!(started || graced)) return;
+  const spec = segment.inSpec;
+  // Mark the moment the clip is confirmed playing, so delayMs is measured from here.
+  if(!segment.fadeInReadyAt) segment.fadeInReadyAt = Date.now();
+  const delay = spec && spec.delayMs > 0 ? spec.delayMs : 0;
+  if(Date.now() - segment.fadeInReadyAt >= delay){
+    fadeInIfPending();
+  }
+}
+
+// Enter a branch: pause and present the card. The branch node sits in the current
+// top frame; options descend as child frames tagged with this branch.
+/**
+ * Present a branch: pause, show the choice card, and wait.
+ *
+ * Nothing advances until the viewer picks. Single-select commits and moves on;
+ * multi-select returns here afterwards so the remaining options can be watched.
+ */
+function enterBranch(node){
+  segment = null;
+  branchState = { node, done: new Set() };
+  if(playerReady) player.pauseVideo();
+  if(TL_DEBUG) addMsg('system','[tl] branch '+node.path+' select='+node.select+' require='+node.require);
+  renderBranchCard(node);
+}
+
+// A branch option was chosen. Descend into its timeline as a new stack frame tagged
+// with the branch, then begin processing it.
+/**
+ * Take a branch option: push its nested timeline as a new frame and start walking it.
+ *
+ * Watched options are recorded on the node so a multi-select branch can show what
+ * has already been seen when the viewer comes back to it.
+ */
+function chooseBranchOption(node, optIdx){
+  const opt = node.options[optIdx];
+  if(!opt || !opt.timeline || !opt.timeline.length){ return; }
+  branchState.done.add(optIdx);
+  // Remember which options have been watched, then release the branch hold while the
+  // chosen option plays. branchState must be null during playback: while it is set,
+  // the cue loop treats us as "in a detour" and fires nothing, so cues authored on
+  // option clips would never appear. treeAdvance restores the branch card (and this
+  // done set) when the option finishes.
+  const doneSoFar = branchState.done;
+  node._doneOptions = doneSoFar;
+  branchState = null;
+  hideBranchOverlay();
+  treeStack.push({ arr: opt.timeline, idx: 0, branchNode: node });
+  treeStep(true);
+}
+
+// Proceed past a branch (the user is done with it). Ascend out of the branch by
+// advancing the frame the branch lives in. Called from the branch card's Carry on.
+/** Leave a multi-select branch without watching the rest, and continue the parent. */
+function proceedBranch(){
+  branchState = null;
+  treeAdvance(true);
+}
+
+
+
+/**
+ * Pull a YouTube video id out of whatever the author wrote.
+ *
+ * Track authors paste whatever is in the address bar, so this accepts full watch
+ * URLs, youtu.be short links, embed URLs and bare ids alike. Being forgiving here
+ * saves a class of track that looks correct but silently fails to load.
+ */
+function extractVideoId(v){
+  if(!v) return v;
+  v = v.trim();
+  if(/^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+  const m = v.match(/(?:youtu\.be\/|[?&]v=|\/embed\/|\/live\/|\/shorts\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : v;
+}
+
+// Force subtitles off. YouTube can re-enable captions when a new video loads or
+// from the viewer's account default, so we clear the caption track and unload the
+// captions module. Called on ready and after every video switch.
+/**
+ * Suppress YouTube's own subtitles.
+ *
+ * Prompt Track draws its own captions over the video, and YouTube's would collide
+ * with them. cc_load_policy in playerVars is not reliable on its own, so the
+ * captions module is also unloaded here once the player is ready. Wrapped in a
+ * try because the call is undocumented and absent on some player builds.
+ */
+function turnCaptionsOff(){
+  if(!player) return;
+  try{ player.setOption('captions', 'track', {}); }catch(e){}
+  try{ player.setOption('cc', 'track', {}); }catch(e){}
+  try{ player.unloadModule('captions'); }catch(e){}
+  try{ player.unloadModule('cc'); }catch(e){}
+}
+
+function createPlayer(videoId){
+  videoId = extractVideoId(videoId);
+  if(player){ try{ player.destroy(); }catch(e){} player=null; playerReady=false; duration=0; }
+  const ratio = document.querySelector('.ratio');
+  ratio.innerHTML = '<div id="player"></div>';
+  player = new YT.Player('player',{
+    videoId, host:'https://www.youtube-nocookie.com',
+    // cc_load_policy:0 tells the player not to force captions on; combined with
+    // unsetting the module on ready, videos default to no subtitles.
+    playerVars:{controls:0, disablekb:1, rel:0, modestbranding:1, playsinline:1, cc_load_policy:0, cc_lang_pref:'', hl:'en'},
+    events:{
+      onReady:()=>{
+        playerReady=true; duration=player.getDuration()||0; buildRail(); startPoll(); updateClock();
+        turnCaptionsOff(); buildSpeedControl();
+        // If this track has a tree timeline, cue its first clip (paused, bounded).
+        // The learner presses play; the tree walks from there. If the first node is
+        // a branch, present it immediately.
+        if(timeline && timeline.length && !treeStack.length){
+          treeStack = [{ arr: timeline, idx: 0 }];
+          const first = timeline[0];
+          if(first && first.type==='clip'){
+            segment = { video: first.video, until: first.to, ret: null, tree: true, node: first, startedAt: Date.now(), dur: Math.max(0, first.to-first.from) };
+            // Keep currentVideoKey in step with what we cue, so the boundary/advance
+            // logic (which checks currentVideoKey===segment.video) works even when the
+            // first clip uses a video other than the main one.
+            currentVideoKey = first.video;
+            player.cueVideoById({ videoId: videosMap[first.video], startSeconds: Math.max(0,first.from), endSeconds: first.to });
+          } else if(first && first.type==='still'){
+            // Show the still as the opening screen, but hold the dwell until the user
+            // presses Play (shownAt stays null until then).
+            segment = { still:true, tree:true, node:first, hold:first.hold,
+                        startedAt: Date.now(), shownAt: null, dur:0,
+                        inSpec: clipTransitionIn(first), fadeIn:false, until:0, pendingStart:true };
+            renderStillImage(first);
+          } else {
+            treeStep(false);
+          }
+          renderTimelineStrip();
+          buildRail();
+        }
+      },
+      onStateChange:(e)=>{
+        if(duration===0){ duration=player.getDuration()||0; if(duration) buildRail(); }
+        // A newly loaded/cued video can bring captions back; keep them off.
+        if(e.data===1 || e.data===5){ turnCaptionsOff(); applyPlaybackRate(); }
+        if(e.data===1){ // picture is up: let the fade-in logic (delay-aware) run
+          const ct = (player && player.getCurrentTime) ? player.getCurrentTime() : NaN;
+          maybeFadeInFromTick(ct);
+        }
+        reportPlayback(true); updatePlayPause();
+        // YouTube fires ENDED (0) when a bounded tree clip reaches endSeconds. That
+        // is the reliable boundary trigger. Advance the tree here.
+        if(e.data === 0 && segment && segment.tree && !activeCue){
+          const pos = player.getCurrentTime()||0;
+          if(pos < segment.until - 2){
+            const nearStart = pos <= ((segment.until - segment.dur) + 2);
+            if(nearStart && !segment.replayed){
+              segment.replayed = true;
+              player.loadVideoById({ videoId: videosMap[segment.video], startSeconds: Math.max(0, segment.until - segment.dur), endSeconds: segment.until });
+              return;
+            }
+            // Genuine early end (video shorter than clip). Let tick()'s hold logic
+            // keep the frame until the clip window elapses, then advance.
+            return;
+          }
+          if(TL_DEBUG) addMsg('system','[tl] ENDED tree clip, advancing');
+          segment = null;
+          treeAdvance(true);
+        }
+      },
+      onError:(e)=>{ addMsg('system','Video failed to load. '+(YT_ERRORS[e.data]||('YouTube error code '+e.data+'.'))); }
+    }
+  });
+}
+
+/**
+ * Start the 250ms playback poll, replacing any existing one.
+ *
+ * Everything time-driven in the player hangs off this: cue firing, the rail, the
+ * clock, clip boundaries, still dwell. Polling rather than listening to YouTube
+ * events because those events are not reliably delivered, and a missed one would
+ * mean a cue that never fires. Clearing first makes the function safe to call
+ * again on a video change.
+ */
+function startPoll(){ if(pollTimer) clearInterval(pollTimer); pollTimer=setInterval(tick,250); }
+
+/**
+ * The player's state as a readable word rather than a YouTube numeric constant.
+ * Used in status frames so the server side stays legible.
+ */
+function ytStateName(){
+  if(!playerReady || !player.getPlayerState) return 'unknown';
+  const map = {'-1':'unstarted','0':'ended','1':'playing','2':'paused','3':'buffering','5':'cued'};
+  return map[String(player.getPlayerState())] || 'unknown';
+}
+
+/**
+ * Tell the server where playback is, at most once a second unless forced.
+ *
+ * Throttled because tick runs four times a second and Claude does not need that
+ * resolution. Callers pass force at moments that matter (a seek, a state change)
+ * so the server is never left describing a position the viewer has left.
+ */
+function reportPlayback(force){
+  if(!playerReady) return;
+  const now = Date.now();
+  if(!force && now - lastPlaybackSent < 2000) return;
+  lastPlaybackSent = now;
+  send({type:'playback', time: player.getCurrentTime()||0, state: ytStateName(), video: currentVideoKey});
+}
+
+function tick(){
+  if(!playerReady || !player.getCurrentTime) return;
+  const t = player.getCurrentTime();
+  updateClock(t); updateRail(t); reportPlayback(false); updatePlayPause();
+  showContextFor(t);
+  // TIMELINE DIAGNOSTIC.
+  if(TL_DEBUG && segment && segment.tree){
+    const near = t >= segment.until - 3;
+    if(near && (!tick._lastLog || Date.now()-tick._lastLog > 700)){
+      tick._lastLog = Date.now();
+      addMsg('system','[tl] clip ('+segment.video+') t='+t.toFixed(2)+' until='+segment.until+' state='+ytStateName()+' cur='+currentVideoKey);
+    }
+  }
+  // PENDING FADE-IN. Lift the cover for a freshly-started clip. Polled here so it
+  // never depends on the YouTube play event alone (which can be missed).
+  maybeFadeInFromTick(t);
+  // STILL DWELL. A still image is not driven by the playhead. Hold it for `hold`
+  // seconds (wall-clock from when it was shown), then pre-fade out with its own
+  // transitionOut and advance. The fade-out lead is subtracted so the screen is dark
+  // as the still ends, matching clip transitions.
+  if(segment && segment.still && !activeCue && !branchState){
+    if(segment.pendingStart || !segment.shownAt) return; // waiting for Play to begin
+    const shownFor = (Date.now() - segment.shownAt) / 1000;
+    if(!segment.preFaded){
+      const out = clipTransitionOut(segment.node);
+      if(out && nextIsPlayableClip()){
+        const lead = (out.ms + (out.holdMs||0)) / 1000;
+        if(shownFor >= Math.max(0, segment.hold - lead)){
+          segment.preFaded = true;
+          setCoverColor(out.color);
+          fadeCoverTo(true, out.ms);
+        }
+      }
+    }
+    if(shownFor >= segment.hold){
+      // If this still already ended the track, just keep holding the image.
+      if(segment._ended) return;
+      // If this still is the FINAL node in the timeline, leave the image on screen and
+      // end the track without clearing it (so it does not revert to a paused video
+      // frame). It stays until the viewer resets. Otherwise, advance as normal.
+      if(stillIsTerminal(segment.node)){
+        segment._ended = true;
+        if(playerReady){ try{ player.pauseVideo(); }catch(e){} }
+        branchState = null; treeStack = [];
+        const rs = document.getElementById('railState'); if(rs) rs.textContent = 'end';
+        renderTimelineStrip();
+        addMsg('system','End of the track.');
+        // Keep segment.still so tick() keeps holding here and does not run clip logic.
+        return;
+      }
+      const wasPreFaded = segment.preFaded;
+      clearStillImage();
+      segment = null;
+      treeAdvance(true, wasPreFaded);
+      return;
+    }
+    return; // while a still holds, skip the clip playhead logic below
+  }
+  // PRE-FADE. Begin the fade-out BEFORE the clip ends, using THIS clip's own
+  // transitionOut, so the picture and sound are dark at the exact cut. Only when a
+  // playable clip follows (a branch/end pauses, so no fade-out into it).
+  if(segment && segment.tree && !activeCue && !branchState && !segment.preFaded
+     && currentVideoKey===segment.video){
+    const out = clipTransitionOut(segment.node);
+    if(out && nextIsPlayableClip()){
+      const lead = (out.ms + (out.holdMs||0)) / 1000 / (playbackRate||1);
+      if(t >= segment.until - lead){
+        segment.preFaded = true;
+        segment.outSpec = out; // remembered so the switch knows the hold time
+        setCoverColor(out.color);
+        fadeCoverTo(true, out.ms);
+        if(out.audio) fadeAudio(0, out.ms);
+      }
+    }
+  }
+  // HARD TIMELINE CUTOFF. A tree clip must never play past its `to`. Fires the moment
+  // the playhead reaches `to` in any state, then advances the tree.
+  if(segment && segment.tree && !activeCue
+     && currentVideoKey===segment.video && t >= segment.until - 0.05){
+    const wasPreFaded = segment.preFaded;
+    segment = null;
+    treeAdvance(true, wasPreFaded);
+    return;
+  }
+  // VIDEO SHORTER THAN CLIP. If the video ends before `to`, hold the frame and
+  // advance only once the clip's intended duration has elapsed.
+  if(segment && segment.tree && !activeCue
+     && currentVideoKey===segment.video){
+    const st = ytStateName();
+    const elapsed = (Date.now() - (segment.startedAt||Date.now())) / 1000;
+    if(st==='ended' || (st==='paused' && segment.holding)){
+      segment.holding = true;
+      if(playerReady && st!=='paused') player.pauseVideo();
+      if(elapsed >= (segment.dur||0) / (playbackRate||1)){
+        segment = null;
+        treeAdvance(true);
+        return;
+      }
+    }
+  }
+  if(segment && !segment.tree && currentVideoKey===segment.video && t>=segment.until && ytStateName()==='playing'){
+    const ret = segment.ret;
+    segment = null;
+    if(ret && ret.video){ switchVideo(ret.video, ret.t, true); }
+    else { player.pauseVideo(); addMsg('system','End of clip.'); }
+    return;
+  }
+  // The timeline plays through the `segment` mechanism above (enterTimelineSegment
+  // sets segment.timelineIdx, and the block at the top of tick() chains to the next
+  // segment when each one ends). There is deliberately no second auto-advance path
+  // here: one mechanism, one code path, played strictly in array order.
+  if(mode!=='lab' || activeCue || !track) return;
+  if(ytStateName()!=='playing') return;
+  // No authored cue fires during a branch or a non-tree detour clip.
+  const inDetour = branchState || (segment && !segment.tree);
+  if(inDetour) return;
+  for(const cue of track.cues){
+    if(cueVideoKey(cue)!==currentVideoKey) continue;
+    if(cue.type==='context' || cue.type==='branch') continue; // context is silent; branches live in the tree
+    if(!fired.has(cue.id) && t>=cue.t && t<cue.t+FIRE_WINDOW){
+      if(cue.type==='note'){
+        // Passive, non-pausing: caption on the video (unless hidden) and a sidebar entry.
+        fired.add(cue.id);
+        markCue(cue.id,'passed');
+        showNoteCaption(cue);
+        addMaterial(cue);
+        send({type:'cue_fired', cueId: cue.id});
+        continue; // do not break: notes never hold the floor
+      }
+      fireCue(cue); break; // task/quiz/other: pause and present
+    }
+    if(fired.has(cue.id) && t<cue.t-REARM_BACK && !activeCue){ fired.delete(cue.id); markCue(cue.id,'armed'); removeMaterial(cue.id); send({type:'cue_rearmed', cueId: cue.id}); }
+  }
+}
+
+/* ===================== cues ===================== */
+/**
+ * Track which context section the playhead is in and tell the server when it changes.
+ *
+ * Context cues are invisible to the viewer. They exist so Claude can say something
+ * specific about what is on screen. Only transitions are reported, which is what
+ * lastContextShown guards.
+ */
+function showContextFor(t){
+  if(!track) return;
+  // Context cues are a silent knowledge layer for Claude (surfaced via the MCP
+  // server's currentSection). They are deliberately NOT rendered on the page.
+  // We still track the latest one so the rail/state and server stay in sync.
+  // Cues are collected in timeline order, which is not timestamp order (option clips
+  // jump around the source video). Sort by t so "the section in force" is genuinely
+  // the latest one the playhead has passed, not just the last one in the array.
+  const sections = track.cues
+    .filter(c => c.type==='context' && cueVideoKey(c)===currentVideoKey && c.t <= t)
+    .sort((a,b)=>a.t-b.t);
+  if(!sections.length) return;
+  const current = sections[sections.length-1];
+  if(current.id === lastContextShown) return;
+  lastContextShown = current.id;
+  // (No DOM output: context is data for Claude, not a visible caption.)
+}
+
+/**
+ * Trigger a cue: pause the video, hand it the floor, show its card.
+ *
+ * The centre of the whole idea. Once a cue is active the viewer is expected to do
+ * something, and playback does not continue until the floor is released, either by
+ * them pressing the button or by Claude calling resume_video. The id goes into
+ * `fired` so it cannot trigger twice on one pass.
+ */
+function fireCue(cue){
+  if(cue.type==='branch'){
+    const choices = branchChoices(cue);
+    if(choices.length === 1){
+      fired.add(cue.id);
+      markCue(cue.id,'passed');
+      send({type:'cue_fired', cueId: cue.id});
+      send({type:'cue_completed', via:'branch-auto'});
+      addMsg('system', (cue.intro ? cue.intro+' ' : '') + 'Jumping' + (choices[0].label ? ' to '+choices[0].label : '') + (choices[0].until ? ', you will be brought back automatically.' : '.'));
+      startClip(choices[0], cue);
+      return;
+    }
+  }
+  activeCue = cue; fired.add(cue.id);
+  player.pauseVideo();
+  document.getElementById('frame').classList.add('cue-live');
+  document.getElementById('panel').classList.add('cue-live');
+  document.getElementById('railState').textContent = 'holding';
+  markCue(cue.id,'live');
+  send({type:'cue_fired', cueId: cue.id});
+  renderCueCard(cue);
+}
+
+/**
+ * Release the floor a cue is holding and carry on.
+ *
+ * @param {boolean} fromClaude True when Claude called resume_video, false when the
+ *   viewer pressed the button. Recorded so the session log shows how much help was
+ *   needed, and it is the `via` field the server stores against cue_completed.
+ */
+function resumeFromCue(fromClaude){
+  const wasHold = segment && segment.hold;
+  if(activeCue){
+    markCue(activeCue.id,'passed');
+    send({type:'cue_completed', via: fromClaude ? 'claude' : 'page'});
+    retireMaterial(activeCue.id);
+    activeCue = null;
+  }
+  document.getElementById('frame').classList.remove('cue-live');
+  document.getElementById('panel').classList.remove('cue-live');
+  document.getElementById('railState').textContent = 'armed';
+  if(fromClaude) addMsg('system','Claude resumed the video.');
+  // A hold node has no video to play; resolving its cue advances to the next node.
+  if(wasHold){
+    segment = null;
+    treeAdvance(true, false);
+    return;
+  }
+  if(playerReady) player.playVideo();
+}
+
+// Wipe every trace of a playthrough from the UI and state. Used by both Reset and
+// track loading so a fresh track (or the same one reloaded) shows no evidence of
+// having been played. Anything that accumulates during playback belongs here.
+/** Drop all playback and tree position, leaving the track itself loaded. */
+function clearPlaybackState(){
+  fired.clear();
+  activeCue = null;
+  segment = null; branchState = null; treeStack = [];
+  // Branch nodes park their watched-options set on the node while an option plays;
+  // clear it so a replay shows nothing as already watched.
+  if(timeline){
+    const clearDone = (arr)=>{ for(const n of (arr||[])){ if(!n) continue; if(n._doneOptions) delete n._doneOptions;
+      if(n.type==='branch') (n.options||[]).forEach(o=>clearDone(o.timeline)); } };
+    clearDone(timeline);
+  }
+  lastContextShown = null;          // so context sections re-fire
+  materials = []; activeMaterialId = null;
+  variables = {}; varsAsked = false; // viewer-entered values do not carry over
+  // timers that could fire after the wipe
+  clearInterval(fadeAudioTimer);
+  clearTimeout(playTreeClip._safety);
+  clearTimeout(reseekTimer);
+  clearTimeout(showNoteCaption._t);
+  // visual layers
+  const fc = document.getElementById('fadeCover');
+  if(fc){ fc.classList.remove('on'); fc.style.background=''; fc.style.removeProperty('--fade-ms'); }
+  clearStillImage();
+  hideBranchOverlay();
+  const cap = document.getElementById('noteCap');
+  if(cap){ cap.classList.remove('show'); cap.innerHTML=''; }
+  document.getElementById('frame').classList.remove('cue-live');
+  document.getElementById('panel').classList.remove('cue-live');
+  const rs = document.getElementById('railState'); if(rs) rs.textContent = 'armed';
+  // sound back to normal
+  if(playerReady && player.setVolume){ try{ player.setVolume(100); }catch(e){} }
+  renderMaterials();
+  renderTimelineStrip();
+  updatePlayPause();
+}
+
+/**
+ * Return to the very start: clear fired cues, materials, the tree stack and any
+ * active card, then re-cue the first node. Used by the reset control and after
+ * loading a new track.
+ */
+function resetTrack(){
+  clearPlaybackState();
+  if(track && Array.isArray(track.cues)) track.cues.forEach(c=>{ markCue(c.id,'armed'); send({type:'cue_rearmed', cueId: c.id}); });
+  // Restart the tree from the root, cued paused on the first node.
+  if(timeline && timeline.length){
+    treeStack = [{ arr: timeline, idx: 0 }];
+    const first = timeline[0];
+    if(first && first.type==='clip' && playerReady){
+      segment = { video: first.video, until: first.to, ret: null, tree: true, node: first, startedAt: Date.now(), dur: Math.max(0, first.to-first.from) };
+      // Keep currentVideoKey in step with the re-cued clip, else the boundary and
+      // pre-fade checks (which compare currentVideoKey===segment.video) never match
+      // when the first clip uses a non-main video, so nothing works after a reset.
+      currentVideoKey = first.video;
+      player.cueVideoById({ videoId: videosMap[first.video], startSeconds: Math.max(0,first.from), endSeconds: first.to });
+      buildRail();
+    } else if(first && first.type==='still' && playerReady){
+      // Show the opening still again, held until the user presses Play (pendingStart).
+      segment = { still:true, tree:true, node:first, hold:first.hold,
+                  startedAt: Date.now(), shownAt: null, dur:0,
+                  inSpec: clipTransitionIn(first), fadeIn:false, until:0, pendingStart:true };
+      renderStillImage(first);
+      // Park the underlying video paused and silent so nothing plays under the still.
+      const fc = timeline.find(n=>n.type==='clip');
+      if(fc){ try{ player.cueVideoById({ videoId: videosMap[fc.video], startSeconds: Math.max(0,fc.from), endSeconds: fc.to }); player.pauseVideo(); }catch(e){} }
+      buildRail();
+    } else if(first && first.type==='branch'){
+      treeStep(false);
+    }
+  } else if(playerReady){ player.seekTo(0, true); player.pauseVideo(); }
+  renderTimelineStrip();
+  addMsg('system','Track reset.');
+}
+
+/* ===================== rail ===================== */
+/**
+ * Seek from a click on the progress rail.
+ *
+ * The rail shows position within the CURRENT CLIP, not the whole track, because a
+ * tree timeline has no single linear duration to scrub against. Worth remembering
+ * when this looks like it is scrubbing the wrong distance.
+ */
+function railScrub(ev){
+  if(!playerReady) return;
+  if(ev.target.classList.contains('cue-mark') || ev.target.classList.contains('cue-dot')) return;
+  const rail = document.getElementById('rail');
+  const rect = rail.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+  const wasPlaying = ytStateName()==='playing';
+  if(timeline && segment && segment.tree){
+    // Scrub within the current clip only. Cross-clip and branch navigation is driven
+    // by the tree, not the rail, so a scrub never jumps between tree nodes.
+    const from = segment.until - (segment.dur||0);
+    const target = from + frac * (segment.dur||0);
+    player.seekTo(Math.max(0, target), true);
+    if(wasPlaying) player.playVideo();
+  } else if(!timeline){
+    if(duration) player.seekTo(frac * duration, true);
+  }
+}
+
+// Render the visible timeline strip for the CURRENT timeline (top of the tree
+// stack). Shows each node of that array, marks the one being processed as active
+// and earlier ones as done, and shows a breadcrumb of how deep we are. When a child
+// timeline is entered the strip switches to it; on exit it returns to the parent.
+/** Redraw the strip showing the tree's nodes and which one is current. */
+function renderTimelineStrip(){
+  const strip = document.getElementById('tlStrip');
+  if(!strip) return;
+  if(!timeline || !treeStack.length){ strip.innerHTML=''; return; }
+  const top = treeStack[treeStack.length-1];
+  const arr = top.arr, activeIdx = top.idx;
+  const crumbs = ['Timeline'];
+  for(let i=1;i<treeStack.length;i++){
+    const f = treeStack[i];
+    if(f.branchNode){
+      const optIdx = f.branchNode.options.findIndex(o=>o.timeline===f.arr);
+      const lbl = optIdx>=0 ? f.branchNode.options[optIdx].label : 'option';
+      crumbs.push(lbl);
+    } else { crumbs.push('sub'); }
+  }
+  const label = (n)=>{
+    if(n.type==='clip') return (videoTitle(n.video)||n.video)+' '+fmt(n.from)+'\u2013'+fmt(n.to);
+    if(n.type==='branch') return (n.title||'Branch')+' ('+(n.select==='single'?'pick one':'pick any')+')';
+    if(n.type==='end') return 'End';
+    return n.type;
+  };
+  let html = '';
+  if(crumbs.length>1){
+    html += '<div class="tl-crumb">'+crumbs.map((c,i)=> i===crumbs.length-1 ? '<b>'+esc(c)+'</b>' : esc(c)).join(' \u203a ')+'</div>';
+  }
+  html += arr.map((n,i)=>{
+    const cls = 'tl-node '+n.type+(i===activeIdx?' active':'')+(i<activeIdx?' done':'');
+    return '<div class="'+cls+'" title="'+esc(label(n))+'">'+esc(label(n))+'</div>';
+  }).join('');
+  strip.innerHTML = html;
+}
+
+// Skip back: jump to the previous experienced cue before the current position
+// within this clip; if none, jump to the start of the clip.
+// Find the previous clip node in the current tree frame (the clip before the one
+// playing, in the same array). Returns { node, idx } or null if this is the first
+// clip in the frame. Branches/ends are skipped so Back lands on real clips.
+/**
+ * Find the previous playable node in the current frame, for skip-back.
+ *
+ * Scans backwards past nodes that cannot be played into (branches, ends), since
+ * landing on one would leave the viewer staring at a choice card they already made.
+ */
+function previousClipInFrame(){
+  if(!treeStack.length || !segment || !segment.node) return null;
+  const frame = treeStack[treeStack.length-1];
+  if(!frame || !Array.isArray(frame.arr)) return null;
+  const idx = frame.arr.indexOf(segment.node);
+  if(idx < 0) return null;
+  for(let j = idx-1; j >= 0; j--){
+    const n = frame.arr[j];
+    if(n && (n.type === 'clip' || n.type === 'still' || n.type === 'hold')) return { node: n, idx: j };
+  }
+  return null;
+}
+// Play a node that is a clip, still or hold, routing to the right player.
+/**
+ * Play a specific node directly, bypassing the normal walk.
+ *
+ * Used by navigation (skip, rail, Claude's go_to) where the destination is known
+ * rather than reached in sequence.
+ *
+ * @param {boolean} [alreadyDark] The cover is already up, so do not fade twice.
+ */
+function playTreeNode(node, autoplay=true, alreadyDark=false){
+  if(node.type === 'still') playTreeStill(node, autoplay, alreadyDark);
+  else if(node.type === 'hold') playTreeHold(node, autoplay, alreadyDark);
+  else playTreeClip(node, autoplay, alreadyDark);
+}
+
+// Back button. Mirrors Skip ahead in reverse, stepping through each process:
+//   - If there is a cue (note/task/quiz) earlier in THIS clip, jump to just before
+//     it so it re-fires as you go forward (and clear its sidebar entry).
+//   - Else if we are past the clip start, restart THIS clip (with its fade-in).
+//   - Else step to the PREVIOUS clip and play it (with its fade-in).
+// A cue or branch holding the floor is released/rewound rather than blocking.
+// How far before a cue to land when stepping back to it. Must be comfortably greater
+// than REARM_BACK (the auto-rearm threshold) and the fire window, so the cue reads as
+// genuinely "not yet reached": too small a gap and the seek can settle past the fire
+// window, leaving the cue un-fired but never re-firing.
+const CUE_LANDING_GAP = Math.max(1.2, REARM_BACK * 2 + FIRE_WINDOW);
+
+/**
+ * Step back one clip in the timeline tree.
+ *
+ * Harder than a seek: "back" means the previous node in the current frame, which
+ * may be in a different source video, and may sit inside a branch option the
+ * viewer chose earlier. See previousClipInFrame for the lookup.
+ */
+function skipBack(){
+  if(!playerReady) return;
+  if(branchState) return; // a branch overlay is showing; let the user choose
+  clearStepVisuals();
+
+  // If we are on a still, Back steps to the previous node (or restarts the still).
+  if(segment && segment.still){
+    clearStillImage();
+    const prev = previousClipInFrame();
+    if(prev){
+      const frame = treeStack[treeStack.length-1];
+      frame.idx = prev.idx;
+      segment = null;
+      playTreeNode(prev.node, true, false);
+    } else {
+      const node = segment.node;
+      segment = null;
+      playTreeNode(node, true, false); // first node: restart the still
+    }
+    return;
+  }
+
+  if(timeline && segment && segment.tree){
+    const from = segment.until - (segment.dur||0);
+    const t = player.getCurrentTime ? player.getCurrentTime() : from;
+
+    // If a cue is holding the floor, that IS the step to undo. Release it and land
+    // just before it so it can fire again, then stop. Stepping further back would
+    // skip two steps in one press (the held cue and the one before it).
+    if(activeCue){
+      const held = activeCue;
+      rewindActiveCue();                       // un-fires it and drops its material
+      const landing = (typeof held.t === 'number') ? Math.max(from, held.t - CUE_LANDING_GAP) : from;
+      player.seekTo(landing, true);
+      player.playVideo();
+      return;
+    }
+
+    // Find the latest experienced cue in this clip strictly before the playhead.
+    const priorCues = track.cues
+      .filter(c => cueVideoKey(c)===currentVideoKey && c.type!=='context' && c.type!=='branch'
+                   && typeof c.t === 'number'
+                   && c.t >= from - 0.01 && c.t < t - (CUE_LANDING_GAP + 0.2))
+      .sort((a,b)=>a.t-b.t);
+
+    if(priorCues.length){
+      const target = priorCues[priorCues.length-1];
+      // Land just before the target cue so moving forward re-fires it. Rearm it and
+      // clear its sidebar entry so it is a fresh step again.
+      fired.delete(target.id); markCue(target.id,'armed'); removeMaterial(target.id);
+      send({type:'cue_rearmed', cueId: target.id});
+      player.seekTo(Math.max(from, target.t - CUE_LANDING_GAP), true);
+      player.playVideo();
+      return;
+    }
+
+    // No earlier cue in this clip: restart it, or step to the previous node.
+    const NEAR_START = 1.2;
+    if(t > from + NEAR_START){
+      const node = segment.node;
+      segment = null;
+      clearStillImage();
+      playTreeNode(node, true, false);   // restart this clip with its fade-in
+      return;
+    }
+
+    // At/near the start: step to the previous clip in this frame.
+    const prev = previousClipInFrame();
+    if(prev){
+      const frame = treeStack[treeStack.length-1];
+      frame.idx = prev.idx;
+      segment = null;
+      clearStillImage();
+      playTreeNode(prev.node, true, false);
+      return;
+    }
+    // First clip in the frame: restart it.
+    const node = segment.node;
+    segment = null;
+    clearStillImage();
+    playTreeNode(node, true, false);
+    return;
+  }
+
+  // Non-tree fallback.
+  if(duration){
+    const t = player.getCurrentTime ? player.getCurrentTime() : 0;
+    const prior = track.cues.filter(c=>cueVideoKey(c)===currentVideoKey && c.type!=='context' && c.t<t-0.6).sort((a,b)=>a.t-b.t);
+    const target = prior.length ? prior[prior.length-1].t-0.2 : 0;
+    player.seekTo(Math.max(0,target), true); player.playVideo();
+  }
+}
+
+// Release a cue that is holding the floor WITHOUT marking it completed, so that when
+// the playhead moves forward again it will re-fire. Used by Back.
+/** Replay the moment leading into the active cue, for a viewer who missed it. */
+function rewindActiveCue(){
+  if(!activeCue) return;
+  const id = activeCue.id;
+  fired.delete(id); markCue(id,'armed'); removeMaterial(id);
+  activeCue = null;
+  document.getElementById('frame').classList.remove('cue-live');
+  document.getElementById('panel').classList.remove('cue-live');
+  document.getElementById('railState').textContent = 'armed';
+  send({type:'cue_rearmed', cueId: id});
+}
+
+// Skip ahead: jump to the next cue after the current position within this clip.
+// If there are no more cues in the clip, advance to the next timeline node.
+// Play/pause button on our own UI (YouTube's controls are hidden). Toggles playback
+// and reflects the current state. A cue or branch holding the floor is respected:
+// pressing play while a task/quiz is up would fight the flow, so we no-op there.
+/**
+ * The play/pause control. Also the trigger for first-run behaviour: calibration
+ * questions, and the opening still's dwell timer, both of which wait for a
+ * deliberate press rather than starting on load.
+ */
+function togglePlay(){
+  if(!playerReady) return;
+  if(activeCue || branchState) return; // resolve the current step first
+  // If an opening still is waiting, pressing Play begins its dwell (and fade-in).
+  if(segment && segment.still && segment.pendingStart){
+    segment.pendingStart = false;
+    segment.shownAt = Date.now();
+    segment.fadeIn = !!segment.inSpec;
+    if(segment.inSpec){ setCoverColor(segment.inSpec.color); fadeCoverTo(true,0); maybeFadeInFromTick(NaN); }
+    updatePlayPause();
+    return;
+  }
+  const st = player.getPlayerState ? player.getPlayerState() : -1;
+  if(st === 1){ player.pauseVideo(); }   // 1 = playing
+  else { player.playVideo(); }
+  setTimeout(updatePlayPause, 60);
+}
+// Keep the play/pause label in step with the real player state. Called from the poll
+// and on state changes.
+/** Keep the play/pause button showing the player's actual state. */
+function updatePlayPause(){
+  const btn = document.getElementById('playPause');
+  if(!btn) return;
+  const st = (playerReady && player.getPlayerState) ? player.getPlayerState() : -1;
+  const playing = st === 1;
+  btn.textContent = playing ? 'Pause' : 'Play';
+  btn.classList.toggle('is-playing', playing);
+  // While a cue/branch holds the floor, playing is disabled; show it dimmed.
+  const blocked = !!(activeCue || branchState);
+  btn.disabled = blocked;
+  btn.classList.toggle('is-disabled', blocked);
+}
+
+// Clear only what belongs to the step being left, used by Back and Skip ahead. This
+// deliberately does NOT touch fired cues elsewhere, materials for other steps, the
+// tree position, or branch progress: stepping is not a reset.
+/** Tear down the current cue card and any on-video caption it put up. */
+function clearStepVisuals(){
+  const cap = document.getElementById('noteCap');
+  if(cap){ cap.classList.remove('show'); cap.innerHTML=''; }
+  clearTimeout(showNoteCaption._t);
+  clearTimeout(playTreeClip._safety);
+  clearInterval(fadeAudioTimer);
+  clearTimeout(reseekTimer);
+  lastContextShown = null;   // let the context section for the new position re-assert
+  if(playerReady && player.setVolume){ try{ player.setVolume(100); }catch(e){} }
+}
+
+/**
+ * Skip forward to the next node, abandoning the current clip.
+ *
+ * Deliberately does not fire the cues being skipped over: the viewer chose to move
+ * on, and firing a queue of missed cards at them would be worse than silence.
+ */
+function skipToNext(){
+  if(!playerReady) return;
+  if(activeCue || branchState) return; // a cue/branch holds the floor; resolve it first
+  clearStepVisuals();
+  // If we are on a still, skipping just advances past it to the next node.
+  if(segment && segment.still){
+    clearStillImage();
+    segment = null;
+    treeAdvance(true);
+    return;
+  }
+  if(timeline && segment && segment.tree){
+    const from = segment.until - (segment.dur||0), to = segment.until;
+    const t = player.getCurrentTime ? player.getCurrentTime() : from;
+    const upcoming = track.cues
+      .filter(c => cueVideoKey(c)===currentVideoKey && c.type!=='context' && c.t > t + 0.3 && c.t <= to)
+      .sort((a,b)=>a.t-b.t);
+    if(upcoming.length){
+      player.seekTo(Math.max(from, upcoming[0].t - 0.2), true);
+      player.playVideo();
+      return;
+    }
+    // No more cues in this clip: end it and advance the tree.
+    segment = null;
+    treeAdvance(true);
+    return;
+  }
+  // Non-tree fallback: jump to next cue by absolute time.
+  if(duration){
+    const t = player.getCurrentTime ? player.getCurrentTime() : 0;
+    const next = track.cues.filter(c=>cueVideoKey(c)===currentVideoKey && c.type!=='context' && c.t>t+0.3).sort((a,b)=>a.t-b.t)[0];
+    if(next){ player.seekTo(Math.max(0,next.t-0.2), true); player.playVideo(); }
+  }
+}
+
+// If the node right after the currently-playing clip (in its tree frame) is a
+// branch, return it, else null. Used to mark an upcoming branch on the rail.
+// Playback speed. Built from YouTube's own supported rates; the chosen rate is
+// remembered and re-applied whenever a new clip loads.
+let playbackRate = 1;
+/** Build the playback speed menu from the rates this video actually supports. */
+function buildSpeedControl(){
+  const host = document.getElementById('speedCtl');
+  if(!host || !player || !player.getAvailablePlaybackRates) return;
+  let rates = [];
+  try{ rates = player.getAvailablePlaybackRates() || []; }catch(e){}
+  if(!rates.length) rates = [0.25,0.5,0.75,1,1.25,1.5,1.75,2];
+  host.innerHTML = 'Speed <select id="speedSel" aria-label="Playback speed"></select>';
+  const sel = document.getElementById('speedSel');
+  rates.forEach(r=>{ const o=document.createElement('option'); o.value=String(r); o.textContent=r+'x'; if(r===playbackRate) o.selected=true; sel.appendChild(o); });
+  sel.onchange = ()=>{ setPlaybackRate(parseFloat(sel.value)); };
+}
+function setPlaybackRate(r){
+  playbackRate = r;
+  try{ if(player && player.setPlaybackRate) player.setPlaybackRate(r); }catch(e){}
+}
+/**
+ * Reapply the chosen speed after a video change.
+ *
+ * Necessary because the player resets to 1x on load, which would silently undo the
+ * viewer's choice partway through a track.
+ */
+function applyPlaybackRate(){
+  try{ if(player && player.setPlaybackRate && playbackRate!==1) player.setPlaybackRate(playbackRate); }catch(e){}
+}
+
+// Is the node that will play after the current clip another clip (so a fade between
+// them makes sense)? A branch or end pauses/stops, so we do not pre-fade into those.
+/**
+ * Whether the next node is something that can be faded into.
+ *
+ * Guards the pre-fade: fading to black before a branch card or the end of the
+ * track would dim the screen for something that is not a cut.
+ */
+function nextIsPlayableClip(){
+  if(!treeStack.length || !segment || !segment.node) return false;
+  const frame = treeStack[treeStack.length-1];
+  if(!frame || !Array.isArray(frame.arr)) return false;
+  const idx = frame.arr.indexOf(segment.node);
+  if(idx < 0) return false;
+  const next = frame.arr[idx+1];
+  if(next) return next.type === 'clip' || next.type === 'still' || next.type === 'hold';
+  // Frame ends here: if it is a branch option, ascent continues the parent. Treat a
+  // parent clip as playable; a branch/end as not.
+  if(frame.branchNode){
+    // returning to a multi branch pauses; only single-commit continues to a clip.
+    return false;
+  }
+  return false;
+}
+
+function nextBranchAfterCurrentClip(){
+  if(!treeStack.length || !segment || !segment.node) return null;
+  const frame = treeStack[treeStack.length-1];
+  if(!frame || !Array.isArray(frame.arr)) return null;
+  const idx = frame.arr.indexOf(segment.node);
+  if(idx < 0) return null;
+  const next = frame.arr[idx+1];
+  return (next && next.type==='branch') ? next : null;
+}
+
+/**
+ * Draw the progress rail and its cue markers for the current clip.
+ *
+ * Rebuilt on every clip change rather than updated in place, since the set of cues
+ * and the duration both change. updateRail moves the playhead within it.
+ */
+function buildRail(){
+  const rail = document.getElementById('rail');
+  rail.querySelectorAll('.cue-mark,.cue-dot,.railcue').forEach(el=>el.remove());
+  rail.onclick = railScrub;
+  if(!track) return;
+
+  // Tree tracks: the rail spans the CURRENT clip. Mark only things the viewer
+  // experiences: notes, tasks, quizzes (by their timestamp within the clip) and a
+  // branch, if one follows this clip in the tree (shown at the clip's end).
+  if(timeline){
+    if(!segment || !segment.tree) return;
+    const from = segment.until - (segment.dur||0), to = segment.until, span = Math.max(0.001, to-from);
+    track.cues
+      .filter(c => cueVideoKey(c)===currentVideoKey && c.t>=from-0.01 && c.t<=to+0.01)
+      .filter(c => c.type!=='context') // context is silent; never marked
+      .forEach(cue=>{
+        const kind = cue.type==='do' ? 'task' : cue.type;
+        const leftPct = Math.min(99, Math.max(0, ((cue.t - from)/span)*100)) + '%';
+        const m = document.createElement('button');
+        m.className = 'railcue '+kind;
+        m.id = 'mark-'+cue.id;
+        m.style.left = leftPct;
+        m.title = fmt(cue.t)+'  '+(cue.title||cue.type);
+        m.innerHTML = '<i></i>';
+        m.onclick = (e)=>{ e.stopPropagation(); if(playerReady){ player.seekTo(Math.max(from, cue.t), true); player.playVideo(); } };
+        rail.appendChild(m);
+      });
+    // Branch marker: if the node after the current clip (in its frame) is a branch,
+    // show it at the end of the rail, since the branch appears when this clip ends.
+    const nextBranch = nextBranchAfterCurrentClip();
+    if(nextBranch){
+      const m = document.createElement('button');
+      m.className = 'railcue branch';
+      m.style.left = '99%';
+      m.title = 'Branch: '+(nextBranch.title||'choose a path')+' (at end of this clip)';
+      m.innerHTML = '<i></i>';
+      m.onclick = (e)=>{ e.stopPropagation(); }; // informational; branch fires on clip end
+      rail.appendChild(m);
+    }
+    return;
+  }
+
+  if(!duration) return;
+  const cuesToShow = track.cues.filter(c => cueVideoKey(c)===currentVideoKey);
+  cuesToShow.forEach(cue=>{
+    const m = document.createElement('button');
+    const cueVid = cueVideoKey(cue);
+    const virt = cue.t;
+    const denom = duration;
+    const leftPct = Math.min(99,(virt/denom)*100) + '%';
+    const goTo = (backOff)=>{
+      if(!playerReady) return;
+      const target = Math.max(0, cue.t - backOff);
+      if(cueVid !== currentVideoKey) switchVideo(cueVid, target, true);
+      else { player.seekTo(target); player.playVideo(); }
+    };
+    if(cue.type==='context'){
+      m.className = 'cue-dot';
+      m.id = 'mark-'+cue.id;
+      m.style.left = leftPct;
+      m.title = fmt(virt)+'  '+cue.title+' (section, click to jump)';
+      m.onclick = (e)=>{ e.stopPropagation(); goTo(0); };
+    } else {
+      m.className = 'cue-mark' + (mode==='lean' ? ' dormant':'');
+      m.id = 'mark-'+cue.id;
+      m.style.left = leftPct;
+      m.title = fmt(virt)+'  '+cue.title;
+      m.onclick = (e)=>{ e.stopPropagation(); fired.delete(cue.id); markCue(cue.id,'armed'); send({type:'cue_rearmed', cueId:cue.id}); goTo(3); };
+    }
+    rail.appendChild(m);
+  });
+}
+/** Set a cue marker's visual state on the rail (pending, fired, done). */
+function markCue(id,state){
+  const el = document.getElementById('mark-'+id);
+  if(!el) return;
+  el.classList.remove('live','passed');
+  if(state==='live') el.classList.add('live');
+  if(state==='passed') el.classList.add('passed');
+}
+/** Move the playhead within the already-built rail. Called every tick. */
+function updateRail(t){
+  if(timeline){
+    if(segment && segment.tree && segment.dur>0){
+      const from = segment.until - segment.dur;
+      document.getElementById('railProg').style.width = Math.min(100, Math.max(0, ((t-from)/segment.dur)*100))+'%';
+    }
+    return;
+  }
+  if(duration) document.getElementById('railProg').style.width = Math.min(100,(t/duration)*100)+'%';
+}
+/** Update the elapsed and remaining readouts for the current clip. */
+function updateClock(t=0){
+  if(timeline){
+    if(segment && segment.tree && segment.dur>0){
+      const from = segment.until - segment.dur;
+      document.getElementById('clock').textContent = fmt(Math.max(0,t-from))+' / '+fmt(segment.dur)+' clip';
+    } else {
+      document.getElementById('clock').textContent = branchState ? 'branch' : '—';
+    }
+    return;
+  }
+  document.getElementById('clock').textContent = fmt(t)+' / '+fmt(duration);
+}
+/** Seconds as m:ss for the clock and rail. */
+function fmt(s){ s=Math.max(0,Math.floor(s||0)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+
+/* ===================== modes ===================== */
+/**
+ * Switch between lab mode (pauses at cues) and straight-through playback.
+ * Lab mode is the point of the product; the other exists for a quick rewatch.
+ */
+function setMode(next){
+  mode = next;
+  document.querySelectorAll('.mode button').forEach(b=>b.setAttribute('aria-pressed', String(b.dataset.mode===next)));
+  document.querySelectorAll('.cue-mark').forEach(m=>m.classList.toggle('dormant', next==='lean'));
+  if(next==='lean' && activeCue){ resumeFromCue(false); }
+  // Calibration (machine/competency) is no longer asked up front. It is only
+  // triggered on demand when a task actually needs it (ensureCalibrated).
+}
+
+/* ===================== chat area (page side companion) ===================== */
+/**
+ * Escape text for safe insertion as HTML.
+ *
+ * Tracks are user-supplied JSON that may come from anywhere, so every author
+ * string reaching innerHTML goes through here or esc2 first. Uses the DOM's own
+ * escaping rather than a regex, which is harder to get subtly wrong.
+ */
+function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+/**
+ * Append a message to the page's own message strip.
+ *
+ * Note this is NOT the Claude conversation: that happens in Claude Desktop, in a
+ * separate window. This strip carries player-level notices such as track loaded,
+ * video changed, end of track, and errors.
+ */
+function addMsg(kind, text, extra){
+  const chat = document.getElementById('chat');
+  // The in-page chat panel has been removed (the companion conversation happens in
+  // Claude's own window). addMsg is kept as a safe no-op so existing callers do not
+  // break; it still returns a detached element so code that reads it keeps working.
+  if(!chat){ return document.createElement('div'); }
+  const el = document.createElement('div');
+  el.className = 'msg '+kind + (extra&&extra.cue?' cue':'');
+  if(extra && extra.cueTag){
+    const tag = document.createElement('span');
+    tag.className='cue-tag'; tag.textContent=extra.cueTag; el.appendChild(tag);
+    el.appendChild(document.createElement('br'));
+  }
+  el.appendChild(document.createTextNode(text));
+  if(extra && extra.code){
+    const cb = document.createElement('div'); cb.className='codeblock'; cb.textContent = extra.code;
+    const cp = document.createElement('button'); cp.className='copy'; cp.textContent='Copy';
+    cp.onclick = ()=>{ navigator.clipboard.writeText(extra.code).then(()=>{cp.textContent='Copied'; setTimeout(()=>cp.textContent='Copy',1400);}); };
+    cb.appendChild(cp); el.appendChild(cb);
+  }
+  if(extra && extra.chips){
+    const row = document.createElement('div'); row.className='chips';
+    extra.chips.forEach(ch=>{
+      const b = document.createElement('button');
+      b.className = 'chip'+(ch.resume?' resume':'');
+      b.textContent = ch.label;
+      b.onclick = ()=>{ if(ch.once!==false) row.querySelectorAll('.chip').forEach(x=>x.disabled=true); ch.fn(); };
+      row.appendChild(b);
+    });
+    el.appendChild(row);
+  }
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+
+let variables = {};
+let varsAsked = false;
+
+/**
+ * Replace {{PLACEHOLDER}} tokens in a code artifact with the viewer's own values.
+ *
+ * How a track ships one canonical snippet that works on everybody's machine: the
+ * author writes {{PROJECT_DIR}}, the viewer is asked once, and every artifact from
+ * then on shows their actual path. Unset placeholders are left visibly intact
+ * rather than blanked, so a missing answer looks like a missing answer.
+ */
+function substitute(code){
+  return String(code).replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (whole, name) =>
+    (variables[name] !== undefined && variables[name] !== '') ? variables[name] : whole);
+}
+
+// Normalise a cue's artifacts to an array of code objects for this learner's platform.
+// Supports both the legacy {mac, windows, any} strings and the array-of-objects form.
+/** Collect a cue's code artifacts, with viewer variables already substituted. */
+function artifactsFor(cue){
+  if(!cue.artifacts) return [];
+  const platform = learner.os || 'any';
+  if(Array.isArray(cue.artifacts)){
+    return cue.artifacts
+      .filter(a => !a.platforms || a.platforms.includes('any') || a.platforms.includes(platform))
+      .map(a => ({
+        label: a.label || null,
+        language: a.language || null,
+        filename: a.filename || null,
+        canonical: String(a.code || ''),
+        template: a.template !== false
+      }));
+  }
+  const legacy =
+    (platform==='mac' && cue.artifacts.mac) ? cue.artifacts.mac :
+    (platform==='windows' && cue.artifacts.windows) ? cue.artifacts.windows :
+    (cue.artifacts.any || cue.artifacts.mac || cue.artifacts.windows || null);
+  return legacy ? [{ label:null, language:null, filename:null, canonical:String(legacy), template:true }] : [];
+}
+
+/** Render one code artifact with its copy control. */
+function renderArtifact(parent, art){
+  const box = document.createElement('div'); box.className='artifact';
+  if(art.filename || art.language || art.label){
+    const head = document.createElement('div'); head.className='artifact-head';
+    const fn = document.createElement('span'); fn.className='fname';
+    fn.textContent = art.filename || art.label || 'code';
+    head.appendChild(fn);
+    if(art.language){ const lg=document.createElement('span'); lg.className='lang'; lg.textContent=art.language; head.appendChild(lg); }
+    box.appendChild(head);
+  }
+  const substituted = art.template ? substitute(art.canonical) : art.canonical;
+  const ta = document.createElement('textarea');
+  ta.value = substituted;
+  ta.spellcheck = false;
+  ta.rows = Math.min(24, Math.max(2, substituted.split('\n').length));
+  ta.addEventListener('input', ()=> box.classList.toggle('dirty', ta.value !== substituted));
+  box.appendChild(ta);
+
+  const foot = document.createElement('div'); foot.className='artifact-foot';
+  const mk = (label, fn)=>{ const b=document.createElement('button'); b.className='mini'; b.textContent=label; b.onclick=()=>fn(b); foot.appendChild(b); return b; };
+  mk('Copy', (b)=>{ navigator.clipboard.writeText(ta.value).then(()=>{ b.textContent='Copied'; setTimeout(()=>b.textContent='Copy',1400); }); });
+  if(art.filename){
+    mk('Download '+art.filename, ()=>{
+      const blob = new Blob([ta.value], {type:'text/plain'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = art.filename; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    });
+  }
+  mk('Reset', ()=>{ ta.value = art.template ? substitute(art.canonical) : art.canonical; box.classList.remove('dirty'); ta.dispatchEvent(new Event('input')); });
+  const ed = document.createElement('span'); ed.className='edited'; ed.textContent='edited by you'; foot.appendChild(ed);
+  box.appendChild(foot);
+  parent.appendChild(box);
+}
+
+// Render the branch card for a tree branch node. Options descend into their
+// timelines via chooseBranchOption. Carry on proceeds past the branch. The
+// require/select flags govern availability of Carry on.
+/** Remove the branch overlay once a choice is made or the branch is left. */
+function hideBranchOverlay(){
+  const ov = document.getElementById('branchOverlay');
+  if(ov){ ov.classList.remove('show'); ov.innerHTML=''; }
+}
+
+// Render the branch as an overlay on top of the paused video. It draws attention
+// where the viewer is already looking, and reappears whenever flow returns to the
+// branch (multi-select return, or re-entry). Options and Carry on are buttons in
+// the overlay; the chat panel is not used for branches.
+/** Draw a branch's choice overlay, marking options already watched. */
+function renderBranchCard(node){
+  if(!branchState || branchState.node !== node) branchState = { node, done: (node._doneOptions || new Set()) };
+  node._doneOptions = branchState.done;
+  const opts = node.options || [];
+  const ov = document.getElementById('branchOverlay');
+  if(!ov) return;
+  const req = node.require==='required' ? 'required' : 'optional';
+  const sel = node.select==='single' ? 'pick one' : 'pick any';
+  const card = document.createElement('div');
+  card.className = 'branch-card';
+
+  const tag = document.createElement('div');
+  tag.className = 'bc-tag';
+  tag.textContent = 'Branch \u00b7 '+sel+' \u00b7 '+req+' \u00b7 '+branchState.done.size+'/'+opts.length+' watched';
+  card.appendChild(tag);
+
+  if(node.title){ const h=document.createElement('h3'); h.textContent=node.title; card.appendChild(h); }
+  const p=document.createElement('p'); p.textContent = node.intro || 'Choose a path.'; card.appendChild(p);
+
+  const list=document.createElement('div'); list.className='bc-opts';
+  opts.forEach((opt,i)=>{
+    const done = branchState.done.has(i);
+    const b=document.createElement('button');
+    b.className='bc-opt'+(done?' done':'');
+    b.innerHTML = (done?'<span class="bc-check">\u2713</span>':'')+esc(opt.label);
+    b.onclick = ()=>{
+      document.getElementById('railState').textContent='branch';
+      hideBranchOverlay();
+      chooseBranchOption(node, i);
+    };
+    list.appendChild(b);
+  });
+  card.appendChild(list);
+
+  const satisfied = branchState.done.size>=1;
+  const canProceed = node.require==='optional' ? true : satisfied;
+  if(canProceed){
+    const allDone = branchState.done.size >= opts.length;
+    const pb=document.createElement('button');
+    pb.className='bc-proceed';
+    pb.textContent = allDone ? 'Carry on (all watched)' : 'Carry on';
+    pb.onclick = ()=>{ hideBranchOverlay(); proceedBranch(); };
+    card.appendChild(pb);
+  }
+
+  ov.innerHTML=''; ov.appendChild(card); ov.classList.add('show');
+}
+
+/* ===================== materials, notes, tasks, quizzes ===================== */
+let materials = [];
+let activeMaterialId = null;
+function esc2(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+/**
+ * Show a note cue as an on-video caption.
+ *
+ * Note cues are passive: they do not pause playback or take the floor, so they are
+ * drawn over the video like a subtitle rather than as a card.
+ */
+function showNoteCaption(cue){
+  if(cue.hideOnVideo) return;
+  const cap = document.getElementById('noteCap');
+  if(!cap) return;
+  const d = document.createElement('div');
+  d.className = 'nc';
+  d.innerHTML = (cue.title?'<b>'+esc2(cue.title)+'</b>':'') + esc2(cue.intro||cue.note||'');
+  cap.innerHTML=''; cap.appendChild(d); cap.classList.add('show');
+  clearTimeout(showNoteCaption._t);
+  const dwell = Number(cue.dwell)|| 6;
+  showNoteCaption._t = setTimeout(()=>{ cap.classList.remove('show'); }, dwell*1000);
+}
+/**
+ * Add a cue's content to the materials sidebar.
+ *
+ * Materials persist after their cue is done, so a viewer can scroll back to a
+ * command from three steps ago without rewinding. Earlier ones grey out to keep
+ * the current step obvious.
+ */
+function addMaterial(cue){
+  const existing = materials.findIndex(m=>m.id===cue.id);
+  // The newest material takes focus; everything before it goes stale (greyed).
+  materials.forEach(m=>{ m._stale = true; });
+  if(existing >= 0){
+    // Already in the sidebar (e.g. it was completed, then the viewer stepped back to
+    // it). Do NOT bail out: revive it as a fresh, actionable card and move it to the
+    // end so it reads as the current step again.
+    const [m] = materials.splice(existing, 1);
+    delete m._stale;
+    materials.push(m);
+    activeMaterialId = m.id;
+    renderMaterials();
+    return;
+  }
+  delete cue._stale;
+  materials.push(cue);
+  activeMaterialId = cue.id;
+  renderMaterials();
+}
+// Mark a material inactive (e.g. a task/quiz was resumed): it greys out and the
+// focus falls back to nothing current until the next one arrives.
+/** Grey out a material once its cue is complete, keeping it readable. */
+function retireMaterial(id){
+  const m = materials.find(x=>x.id===id);
+  if(m){ m._stale = true; if(activeMaterialId===id) activeMaterialId=null; renderMaterials(); }
+}
+// Fully REMOVE a material from the sidebar (used when the playhead rewinds past the
+// cue that created it, so it can fire fresh again on the way forward). The most
+// recent remaining material becomes current again.
+/** Remove a material entirely, e.g. when its cue is re-armed by a rewind. */
+function removeMaterial(id){
+  const i = materials.findIndex(x=>x.id===id);
+  if(i<0){
+    // Not in the sidebar, but the cue object may still carry a stale mark from an
+    // earlier run. Clear it so a re-fire presents as brand new.
+    if(track && Array.isArray(track.cues)){
+      const c = track.cues.find(x=>x.id===id);
+      if(c) delete c._stale;
+    }
+    return;
+  }
+  const removed = materials[i];
+  materials.splice(i,1);
+  // The cue object lives in track.cues, so its completion mark persists unless we
+  // clear it. Without this a re-fired task renders greyed and loses its controls.
+  if(removed) delete removed._stale;
+  if(track && Array.isArray(track.cues)){
+    const c = track.cues.find(x=>x.id===id);
+    if(c) delete c._stale;
+  }
+  if(activeMaterialId===id) activeMaterialId=null;
+  // Restore focus to the newest remaining material.
+  if(materials.length){
+    materials.forEach(m=>{ m._stale = true; });
+    const last = materials[materials.length-1];
+    last._stale = false;
+    activeMaterialId = last.id;
+  }
+  renderMaterials();
+}
+/** Redraw the materials sidebar from current state. */
+function renderMaterials(){
+  const list = document.getElementById('materialsList');
+  const count = document.getElementById('materialsCount');
+  if(!list) return;
+  if(!materials.length){ list.innerHTML='<p class="materials-empty">Notes, tasks and quizzes appear here as the track plays.</p>'; if(count) count.textContent=''; return; }
+  if(count) count.textContent = materials.length;
+  list.innerHTML='';
+  let focusEl = null;
+  materials.forEach(cue=>{
+    const kind = cue.type==='do' ? 'task' : cue.type;
+    const isCurrent = cue.id===activeMaterialId && !cue._stale;
+    const card = document.createElement('div');
+    card.className = 'mat '+kind + (isCurrent?' current':'') + (cue._stale?' stale':'');
+    if(isCurrent) focusEl = card;
+    const tag = document.createElement('div'); tag.className='mat-tag';
+    tag.textContent = (kind==='task'?'Task':kind==='quiz'?'Quiz':'Note') + (cue._stale?' \u00b7 done':'');
+    card.appendChild(tag);
+    if(cue.title){ const h=document.createElement('h4'); h.textContent=cue.title; card.appendChild(h); }
+    if(cue.intro||cue.note){ const p=document.createElement('p'); p.textContent=cue.intro||cue.note; card.appendChild(p); }
+    materialCodeBlocks(cue).forEach(cb=>card.appendChild(cb));
+    if(cue.suggestion || cue.prompt || cue.copyText){
+      const ask = document.createElement('div'); ask.className='mat-ask';
+      ask.innerHTML = '<b>Ask Claude:</b> '+esc2(cue.suggestion || cue.copyText || 'Ask Claude about this.');
+      card.appendChild(ask);
+    }
+    const btns = document.createElement('div'); btns.className='mat-btns';
+    const copyBase = cue.copyText || cue.suggestion;
+    if(copyBase){
+      const copyText = copyBase + '  [prompt-track]';
+      const cb=document.createElement('button'); cb.className='mat-btn'; cb.textContent='Copy the question';
+      cb.onclick=()=>{ navigator.clipboard && navigator.clipboard.writeText(copyText); cb.textContent='Copied'; cb.classList.add('copied'); setTimeout(()=>{cb.textContent='Copy the question';cb.classList.remove('copied');},1600); };
+      btns.appendChild(cb);
+    }
+    if((cue.type==='task'||cue.type==='do'||cue.type==='quiz') && !cue._stale){
+      const done=document.createElement('button'); done.className='mat-btn'; done.textContent='Done, resume';
+      done.onclick=()=>{ if(activeCue&&activeCue.id===cue.id) resumeFromCue(false); };
+      btns.appendChild(done);
+    }
+    if(btns.children.length) card.appendChild(btns);
+    list.appendChild(card);
+  });
+  // Keep the newest/current material in view.
+  const target = focusEl || list.lastElementChild;
+  if(target && target.scrollIntoView) target.scrollIntoView({block:'nearest'});
+}
+/** Extract just the code blocks from a cue, for the sidebar's compact view. */
+function materialCodeBlocks(cue){
+  const out = [];
+  const arts = artifactsFor(cue);
+  arts.forEach(a=>{
+    // artifactsFor returns normalised objects: { canonical, filename, language, label }.
+    const codeText = applyVars(a.canonical || '');
+    const box=document.createElement('div'); box.className='codeblock';
+    const head=document.createElement('div'); head.className='cb-head';
+    const nm=document.createElement('span'); nm.className='cb-name'; nm.textContent=a.filename || a.label || 'snippet';
+    const lg=document.createElement('span'); lg.className='cb-lang'; lg.textContent=a.language || '';
+    head.appendChild(nm); head.appendChild(lg); box.appendChild(head);
+    const pre=document.createElement('pre'); const code=document.createElement('code');
+    code.textContent = codeText;
+    pre.appendChild(code); box.appendChild(pre);
+    const cp=document.createElement('button'); cp.className='cb-copy'; cp.textContent='Copy code';
+    cp.onclick=()=>{ navigator.clipboard && navigator.clipboard.writeText(code.textContent); cp.textContent='Copied'; setTimeout(()=>cp.textContent='Copy code',1500); };
+    box.appendChild(cp);
+    out.push(box);
+  });
+  return out;
+}
+/** Substitute viewer variables into an arbitrary author string, not just code. */
+function applyVars(s){
+  return String(s).replace(/\{\{(\w+)\}\}/g, (m,k)=> (variables && variables[k]!=null) ? variables[k] : m);
+}
+
+/**
+ * Draw the card for a cue holding the floor: title, body, artifacts, the
+ * suggestion the viewer can copy to Claude, and the button that releases the floor.
+ */
+function renderCueCard(cue){
+  if(cue.type==='branch'){ renderBranchCard(cue); return; }
+  // task / do / quiz: add a material card in the sidebar (video is paused by fireCue).
+  if(cue.type==='task' || cue.type==='do' || cue.type==='quiz'){
+    addMaterial(cue);
+    const what = cue.type==='quiz' ? 'A quiz is ready' : 'A task is ready';
+    addMsg('system', what+' in Materials (right). '+(cue.suggestion?('Ask Claude: '+cue.suggestion):'Ask Claude to help, then press Done to resume.'));
+    return;
+  }
+  const arts = artifactsFor(cue);
+  let intro = cue.intro;
+  if(learner.comfort==='expert' && arts.length){ intro = cue.title+'. Code below, personalised to your values.'; }
+  const el = addMsg('companion', intro, {
+    cue:true,
+    cueTag:'Cue '+fmt(cue.t)+' \u00b7 '+cue.type,
+    chips:[
+      {label:'Explain deeper', once:false, fn:()=>{ send({type:'deeper_opened', cueId:cue.id}); addMsg('companion', cue.deeper || 'The track author has not written a deeper note for this cue.'); }},
+      {label:'Done, resume the video', resume:true, fn:()=>resumeFromCue(false)}
+    ]
+  });
+  const chipsRow = el.querySelector('.chips');
+  arts.forEach(a => {
+    const holder = document.createElement('div');
+    renderArtifact(holder, a);
+    el.insertBefore(holder.firstChild, chipsRow);
+  });
+  addMsg('system','Questions about this step? Ask Claude in its window, it can see exactly where you are.');
+}
+
+/* ===================== calibration ===================== */
+// Calibration is on-demand only, called when a task genuinely needs the machine
+// or comfort level (see ensureCalibrated). It is never shown up front.
+/**
+ * Run the calibration questions once, then continue.
+ *
+ * Asks the viewer's OS and comfort level so cue content and Claude's answers can
+ * match their setup. Deferred until first play rather than shown on load, so the
+ * page does not open with a questionnaire.
+ *
+ * @param {Function} then Called once calibration is done, or immediately if it
+ *   already has been.
+ */
+function ensureCalibrated(then){
+  if(calibrated){ if(then) then(); return; }
+  startCalibration(then);
+}
+/** First calibration question: which operating system. */
+function startCalibration(then){
+  calibrated = true;
+  calibrationThen = then || null;
+  addMsg('companion',"Quick question so this step fits your setup. Which machine are you on?",
+    {chips:[
+      {label:'Mac', fn:()=>{learner.os='mac'; send({type:'learner', os:'mac'}); askComfort();}},
+      {label:'Windows', fn:()=>{learner.os='windows'; send({type:'learner', os:'windows'}); askComfort();}},
+      {label:'Linux', fn:()=>{learner.os='linux'; send({type:'learner', os:'linux'}); askComfort();}}
+    ]});
+}
+/** Second calibration question: how comfortable the viewer is with the material. */
+function askComfort(){
+  addMsg('companion',"And how comfortable are you with a terminal? It only changes how much gets explained.",
+    {chips:[
+      {label:'Very. Just commands.', fn:()=>{learner.comfort='expert'; send({type:'learner', comfort:'expert'}); finishCalibration();}},
+      {label:'Somewhat.', fn:()=>{learner.comfort='mid'; send({type:'learner', comfort:'mid'}); finishCalibration();}},
+      {label:'Not really. Walk me through it.', fn:()=>{learner.comfort='beginner'; send({type:'learner', comfort:'beginner'}); finishCalibration();}}
+    ]});
+}
+/** Store the calibration answers, report them to the server, and continue. */
+function finishCalibration(){
+  const then = calibrationThen; calibrationThen = null;
+  maybeAskVariables();
+  if(then) then();
+}
+
+/* ===================== track variables ===================== */
+/**
+ * Ask for any {{PLACEHOLDER}} values the track declares, one at a time.
+ *
+ * Answers go to the server as well as into local state, so Claude substitutes the
+ * same values when it discusses or adapts the code.
+ */
+function maybeAskVariables(){
+  if(varsAsked || !track || !Array.isArray(track.meta.variables) || !track.meta.variables.length) return;
+  varsAsked = true;
+  const defs = track.meta.variables;
+  addMsg('companion','This track personalises its code to you. '+defs.length+(defs.length===1?' value':' values')+' to set, defaults are fine to keep.');
+  askVariable(defs, 0);
+}
+/** Ask for one declared variable, then recurse to the next. */
+function askVariable(defs, i){
+  if(i >= defs.length){
+    send({type:'variables', variables});
+    addMsg('companion','All set. Every code block in this track now arrives with your values already in place, and Claude knows them too.');
+    return;
+  }
+  const def = defs[i];
+  const el = addMsg('companion', def.prompt || ('Value for '+def.name));
+  const row = document.createElement('div'); row.className='varrow';
+  const input = document.createElement('input');
+  input.value = def.default !== undefined ? String(def.default) : '';
+  input.placeholder = def.name;
+  input.spellcheck = false;
+  const btn = document.createElement('button'); btn.className='chip'; btn.textContent='Set';
+  const commit = ()=>{
+    const v = input.value.trim();
+    if(def.pattern){
+      let re; try{ re = new RegExp(def.pattern); }catch(e){ re = null; }
+      if(re && !re.test(v)){ input.classList.add('invalid'); return; }
+    }
+    input.classList.remove('invalid');
+    variables[def.name] = v;
+    input.disabled = true; btn.disabled = true;
+    askVariable(defs, i+1);
+  };
+  btn.onclick = commit;
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter') commit(); });
+  row.appendChild(input); row.appendChild(btn);
+  el.appendChild(row);
+  input.focus();
+}
+
+/* ===================== track loading ===================== */
+// Shown at boot when no track is loaded. Puts a prompt in the video frame directing
+// the author to the loader below.
+/** Empty state shown when no track is loaded, with the ways to load one. */
+function showNoTrackState(){
+  const ratio = document.querySelector('.ratio');
+  if(ratio){
+    ratio.innerHTML = '<div class="no-track">' +
+      '<div class="nt-inner">' +
+      '<h2>No track loaded</h2>' +
+      '<p>This is the Prompt Track player. It ships empty. Load a track below to begin, or create your own and share it.</p>' +
+      '<p class="nt-sub">A track is a single JSON file that overlays timing, cues and an AI persona onto YouTube videos. Nothing plays until you load one.</p>' +
+      '</div></div>';
+  }
+  const rs = document.getElementById('railState'); if(rs) rs.textContent = 'no track';
+  updatePlayPause();
+}
+
+/**
+ * Adopt a loaded track: validate it, build its timeline, reset progress, and tell
+ * the server. The single funnel for every load path (URL, file, default), so
+ * anything that must happen on load belongs here rather than in the callers.
+ */
+function applyTrack(json, sourceLabel){
+  const hasVideo = json && json.meta && (json.meta.video || (Array.isArray(json.meta.videos) && json.meta.videos.length));
+  // Cues may be a flat top-level array (legacy) OR nested inside timeline nodes (new).
+  // Accept either; buildTimeline collects nested cues into track.cues. Only a total
+  // absence of both a cues array and a timeline is suspicious.
+  const hasCuesOrTimeline = Array.isArray(json.cues) || (json.meta && Array.isArray(json.meta.timeline));
+  if(!hasVideo || !hasCuesOrTimeline){
+    addMsg('system','That file does not look like a prompt track. It needs a timeline (or a cues array) and either meta.video or a meta.videos list.');
+    return;
+  }
+  track = json;
+  resolveVideos(track);       // runs buildTimeline, which collects nested cues + ids
+  validateTrackIds(track);    // warn on duplicate node ids or unresolved hold links
+  clearPlaybackState();       // no evidence of any previous playthrough
+  duration = 0;
+  send({type:'track_loaded', track});
+  addMsg('system','Loaded track: '+(track.meta.title||sourceLabel));
+  if(window.YT && YT.Player){ createPlayer(startVideoId()); }
+  maybeAskVariables();
+}
+// Surface authoring mistakes early: duplicate node ids, and cues whose link_id points
+// at no node. These are console warnings (and a visible system note) so they do not
+// silently swallow a broken track.
+/**
+ * Warn about duplicate cue ids.
+ *
+ * Ids address cues everywhere: the `fired` set, activeCue, materials, and every
+ * MCP tool. Duplicates make a track behave erratically in ways that look like
+ * player bugs, so they are surfaced at load time. A warning rather than a refusal,
+ * since the rest of the track will still largely work.
+ */
+function validateTrackIds(t){
+  const ids = {};
+  const dupes = [];
+  const walk = (arr)=>{ if(!Array.isArray(arr)) return; for(const n of arr){ if(!n||!n.type) continue;
+    if(n.id){ ids[n.id] = (ids[n.id]||0)+1; if(ids[n.id]===2) dupes.push(n.id); }
+    if(n.type==='branch' && Array.isArray(n.options)) n.options.forEach(o=>walk(o.timeline)); } };
+  walk(timeline);
+  const unresolved = (t.cues||[]).filter(c => c.link_id && !ids[c.link_id]).map(c => c.link_id);
+  if(dupes.length){ console.warn('[prompt-track] duplicate node ids:', dupes); addMsg('system','Warning: duplicate timeline ids: '+[...new Set(dupes)].join(', ')+'. Ids must be unique.'); }
+  if(unresolved.length){ console.warn('[prompt-track] cues link to missing ids:', unresolved); addMsg('system','Warning: some cues link to ids that do not exist: '+[...new Set(unresolved)].join(', ')+'.'); }
+}
+/**
+ * Turn a convenient URL into a fetchable one.
+ * Notably rewrites GitHub blob links to raw, since pasting the page URL is the
+ * mistake every author makes once.
+ */
+function normaliseTrackUrl(url){
+  const m = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
+  if(m) return 'https://raw.githubusercontent.com/'+m[1]+'/'+m[2]+'/'+m[3];
+  return url;
+}
+/** Fetch and apply a track from a URL entered by the viewer. */
+function loadTrackFromUrl(){
+  let url = document.getElementById('trackUrl').value.trim();
+  if(!url) return;
+  const fixed = normaliseTrackUrl(url);
+  if(fixed!==url){ addMsg('system','That was a GitHub page link, not the raw file. Using the raw URL instead.'); url=fixed; }
+  fetch(url).then(r=>r.json()).then(j=>applyTrack(j,url))
+    .catch(()=>addMsg('system','Could not fetch or parse that URL. A track is a JSON file; you can also drop one into the server tracks/ folder and load it at /tracks/<name>.json.'));
+}
+/** Read and apply a track from a local file the viewer picked. */
+function loadTrackFromFile(file){
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{ try{ applyTrack(JSON.parse(reader.result), file.name); }catch(e){ addMsg('system','That file is not valid JSON.'); } };
+  reader.readAsText(file);
+}
+
+/* ===================== boot ===================== */
+connectWs();
+// Player is locked: YouTube's own controls are hidden (controls:0) and its keyboard
+// shortcuts disabled (disablekb:1). disablekb only applies while the iframe has focus,
+// so also swallow the common seek/playback keys at the page level, EXCEPT when the
+// user is typing in an input/textarea. Space toggles our own play/pause instead.
+document.addEventListener('keydown', (e)=>{
+  const el = e.target;
+  const typing = el && (el.tagName==='INPUT' || el.tagName==='TEXTAREA' || el.isContentEditable);
+  if(typing) return;
+  const k = e.key;
+  const blocked = [' ','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','j','J','k','K','l','L','f','F','m','M','0','1','2','3','4','5','6','7','8','9','Home','End'];
+  if(blocked.includes(k)){
+    e.preventDefault(); e.stopPropagation();
+    if(k===' '){ togglePlay(); } // spacebar drives our button, not YouTube's
+  }
+}, true);
+// No track ships with the app. The player starts empty and waits for the author to
+// load a track (from a URL or a local file) using the loader below. This keeps the
+// app a neutral engine that people fill with their own tracks.
+showNoTrackState();
+</script>
+</body>
+</html>

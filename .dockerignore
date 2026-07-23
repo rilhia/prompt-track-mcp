@@ -1,0 +1,6 @@
+# Never copy host node_modules into the image: the Dockerfile installs its own,
+# and host builds of native modules may not run on Alpine Linux.
+node_modules
+.git
+# Test scripts are run on the host, not inside the container.
+smoke.js
