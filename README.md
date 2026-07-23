@@ -32,7 +32,7 @@ A viewer opens a browser tab and a Claude Desktop window, side by side. The vide
 
 Nothing has to be set up between the two windows. No pairing, no codes, no configuration. Claude and the player page are already talking to the same local server.
 
-<!-- SCREENSHOT: side by side layout, Claude on the left, player on the right -->
+<kbd><img src="images/prompt-track-2.png" alt="Prompt Track" width="800"></kbd>
 
 ---
 
