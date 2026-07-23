@@ -43,7 +43,7 @@ Nothing has to be set up between the two windows. No pairing, no codes, no confi
 One file. No terminal.
 
 1. Download the latest `prompt-track.mcpb` from the [releases page](https://github.com/rilhia/prompt-track-mcp/releases/latest).
-2. Open Claude Desktop, go to **Settings**, then **Extensions**, and drag the file in. Or use Advanced settings, Install Extension.
+2. Right-click the prompt-track.mcpb file and choose to open it with Claude Desktop.
 3. Click **Install**.
 4. Open **http://localhost:3044** in your browser.
 
