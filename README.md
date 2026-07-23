@@ -32,7 +32,7 @@ A viewer opens a browser tab and a Claude Desktop window, side by side. The vide
 
 Nothing has to be set up between the two windows. No pairing, no codes, no configuration. Claude and the player page are already talking to the same local server.
 
-<kbd><img src="images/prompt-track-2.png" alt="Prompt Track" width="800"></kbd>
+<kbd><img src="images/prompt-track-2.png" alt="Prompt Track & Claude" width="800"></kbd>
 
 ---
 
@@ -47,13 +47,13 @@ One file. No terminal.
 3. Click **Install**.
 4. Open **http://localhost:3044** in your browser.
 
+<kbd><img src="images/prompt-track-3.png" alt="Prompt Track install" width="800"></kbd>
+
 That is the entire setup. Claude Desktop runs the server itself using its own bundled runtime, so the player page and the Claude tools come alive together whenever Claude Desktop is open.
 
 **Requirements:** Claude Desktop, any plan including free. Nothing else.
 
 If port 3044 is already in use on your machine, change it in the extension's settings in Claude Desktop.
-
-<!-- SCREENSHOT: the extension installed in Claude Desktop's Extensions pane -->
 
 ### Self-hosting with Docker
 
