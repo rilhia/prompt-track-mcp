@@ -44,6 +44,49 @@ absent on stock Windows. If it fails, the script prints the alternative:
 npx --yes @anthropic-ai/mcpb pack dist/stage dist/prompt-track.mcpb
 ```
 
+## Running under Docker
+
+An alternative to `npm start`, and the way to self-host on a shared machine. It
+runs the web server only: Claude Desktop reaches it separately by exec-ing the
+stdio bridge into the running container.
+
+```bash
+docker compose up -d --build
+```
+
+Then open http://localhost:3044.
+
+Claude Desktop needs telling how to reach the container. Open **Settings**, then
+**Developer**, then **Edit Config**, and add this inside `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "prompt-track": {
+      "command": "docker",
+      "args": ["exec", "-i", "prompt-track", "node", "/app/src/stdio-bridge.js"]
+    }
+  }
+}
+```
+
+Fully quit Claude Desktop (Cmd+Q on Mac, not just closing the window) and reopen
+it.
+
+The container must be running **before** Claude Desktop starts, because the
+bridge execs into it. If the tools do not appear, that is almost always why:
+`docker compose up -d`, then restart Claude Desktop.
+
+To check it is up: `docker compose ps` shows the container running, and
+`curl http://localhost:3044/health` returns ok.
+
+`tracks/` is bind-mounted, so tracks can be added or edited on the host without
+rebuilding. Source changes do need a rebuild: `docker compose up -d --build`. A
+plain start reuses the cached image.
+
+If you have the extension installed as well, both will try to bind port 3044.
+Run one or the other, or change the port on one of them.
+
 ## Running the tests
 
 Two scripts, covering the two transports. Both exit non-zero on failure.
