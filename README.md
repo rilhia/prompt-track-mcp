@@ -10,6 +10,12 @@ Install one file into Claude Desktop and open a browser tab. No API key, no Dock
 
 ---
 
+## Prefer to talk through setup with an AI?
+
+If you prefer to converse with your instructions rather than just read through documentation, copy the text from the [Interactive Setup & Usage Prompt](https://github.com/rilhia/prompt-track-mcp/blob/main/docs/llm-helper-prompt.txt) and paste it into ChatGPT, Claude, Gemini, or any LLM of your choice. It acts as an interactive setup guide that will walk you through installation, configuration, and writing your first track step-by-step.
+
+---
+
 ## Why this exists
 
 I built this to reimagine how the video collateral tech companies already own could be used to introduce the benefits of LLMs like Claude.
