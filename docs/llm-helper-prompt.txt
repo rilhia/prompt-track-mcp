@@ -116,10 +116,9 @@ else. No API key, no Docker, no Node, no terminal.
 
 1. Go to **https://github.com/rilhia/prompt-track-mcp/releases/latest**
 2. Download **`prompt-track.mcpb`**
-3. Open Claude Desktop, go to **Settings**, then **Extensions**
-4. Drag the `.mcpb` file into that pane (or use Advanced settings, Install Extension)
-5. Click **Install**
-6. Open **http://localhost:3044** in a browser
+3. Right-click the **`prompt-track.mcpb`** file and choose to open it with Claude Desktop. 
+4. Click **Install**
+5. Open **http://localhost:3044** in a browser
 
 Claude Desktop runs the server itself on its own bundled runtime, so the player
 page and the Claude tools come alive together whenever Claude Desktop is open.
