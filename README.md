@@ -79,7 +79,7 @@ Open http://localhost:3044 and press play.
 
 **Materials** collect in the sidebar as you go. Code and notes from earlier cues stay available, so you can scroll back to a command from three steps ago without rewinding the video.
 
-<!-- SCREENSHOT: the materials sidebar with a couple of code artifacts in it -->
+<kbd><img src="images/prompt-track-4.png" alt="Materials sidebar" width="800"></kbd>
 
 ### Asking Claude
 
