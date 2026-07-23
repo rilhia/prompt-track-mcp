@@ -106,7 +106,7 @@ A track is a single JSON file. The player contains no content of its own.
 
 There is an authoring tool at **http://localhost:3044/editor.html**, linked from the player. It validates as you type, shows the timeline as a tree, and gives you forms for the fiddly parts while leaving the raw JSON editable at any moment. The JSON is always the source of truth, so you can use the forms where they help and drop into the text whenever they get in the way. There is also a **Load Example** button, which is worth pressing at least once.
 
-<!-- SCREENSHOT: the editor with a track loaded, structure view on the right -->
+<kbd><img src="images/prompt-track-5.png" alt="Editor" width="800"></kbd>
 
 ### Loading a track
 
@@ -144,7 +144,6 @@ difficulty, wait for the answer, then generate a fresh quiz one question at a
 time, keeping score and staying in character throughout. None of that is on the
 card.
 
-<!-- SCREENSHOT: the branch choice card with the nine classic scenes -->
 
 ---
 
